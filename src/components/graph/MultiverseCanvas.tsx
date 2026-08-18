@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ReactFlow, type Edge } from "@xyflow/react";
+import { Controls, MiniMap, Panel, ReactFlow, type Edge } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
 import {
@@ -44,6 +44,19 @@ const dateFormatter = new Intl.DateTimeFormat(undefined, {
 });
 
 const nodeTypes = { commit: CommitNode };
+
+const getMiniMapNodeColor = (node: CommitFlowNode) => {
+  if (node.data.isDefaultBranch) {
+    return "#f5a623";
+  }
+
+  const riskLevel = getRiskLevel(node.data.riskScore);
+  return riskLevel === "high"
+    ? "#ef4444"
+    : riskLevel === "medium"
+      ? "#a78bfa"
+      : "#22d3ee";
+};
 
 interface MultiverseCanvasProps {
   initialGraph?: MultiverseGraph;
@@ -109,12 +122,20 @@ export function MultiverseCanvas({ initialGraph }: MultiverseCanvasProps) {
     () => graph.nodes.find((node) => node.id === selectedCommitId),
     [graph.nodes, selectedCommitId],
   );
+  const summary = useMemo(
+    () => ({
+      commits: graph.nodes.length,
+      variants: graph.branches.filter((branch) => !branch.isDefault).length,
+    }),
+    [graph.branches, graph.nodes.length],
+  );
 
   return (
     <div className="flex flex-col gap-4 lg:flex-row">
       <div className="h-[600px] min-w-0 flex-1 overflow-hidden border border-white/10 bg-[#0c0c14]">
         <ReactFlow<CommitFlowNode>
           className="bg-[#0c0c14]"
+          colorMode="dark"
           edges={edges}
           fitView
           nodes={nodes}
@@ -123,7 +144,32 @@ export function MultiverseCanvas({ initialGraph }: MultiverseCanvasProps) {
           nodeTypes={nodeTypes}
           onNodeClick={(_, node) => setSelectedCommitId(node.id)}
           onlyRenderVisibleElements
-        />
+        >
+          <Panel
+            className="m-3 flex items-center gap-3 border border-white/15 bg-[#12121d] px-3 py-2 text-xs text-[#f0f0f5]"
+            position="top-left"
+          >
+            <span>
+              <strong className="font-semibold">{summary.commits}</strong> commits
+            </span>
+            <span className="h-3 border-l border-white/15" />
+            <span>
+              <strong className="font-semibold">{summary.variants}</strong> Variants
+            </span>
+          </Panel>
+          <Controls aria-label="Canvas navigation" position="bottom-left" showInteractive={false} />
+          <MiniMap<CommitFlowNode>
+            ariaLabel="Multiverse overview"
+            bgColor="#12121d"
+            maskColor="rgba(5, 5, 10, 0.78)"
+            maskStrokeColor="#a0a0b0"
+            nodeColor={getMiniMapNodeColor}
+            nodeStrokeColor="#0c0c14"
+            pannable
+            position="bottom-right"
+            zoomable
+          />
+        </ReactFlow>
       </div>
 
       {selectedCommit ? (
