@@ -10,6 +10,7 @@ import {
 } from "@/components/graph/nodes/CommitNode";
 import { fakeMultiverseGraph } from "@/lib/graph/fake-multiverse-graph";
 import { layoutMultiverseGraph } from "@/lib/graph/layout";
+import { getRiskLevel } from "@/lib/graph/risk";
 import type { MultiverseEdge, MultiverseGraph } from "@/types/multiverse";
 
 const getEdgeStyle = (
@@ -20,15 +21,19 @@ const getEdgeStyle = (
     return { stroke: "#f5a623", strokeWidth: 4 };
   }
 
-  const isHighRiskVariant =
-    (edge.type === "variant" || edge.type === "incursion") &&
+  const riskLevel = getRiskLevel(
     Math.max(
       riskScoreByNode.get(edge.source) ?? 0,
       riskScoreByNode.get(edge.target) ?? 0,
-    ) >= 60;
+    ),
+  );
 
-  if (edge.type === "incursion" || isHighRiskVariant) {
+  if (edge.type === "incursion" || riskLevel === "high") {
     return { stroke: "#ef4444", strokeWidth: 2.5 };
+  }
+
+  if (riskLevel === "medium") {
+    return { stroke: "#a78bfa", strokeWidth: 1.5 };
   }
 
   return { stroke: "#22d3ee", strokeWidth: 1.5 };
@@ -124,27 +129,41 @@ export function MultiverseCanvas({ initialGraph }: MultiverseCanvasProps) {
       {selectedCommit ? (
         <aside
           aria-live="polite"
-          className="w-full border border-white/10 bg-[#0c0c14] p-4 text-sm text-[#f0f0f5] lg:w-72"
+          className="w-full border border-white/15 bg-[#12121d] p-5 text-[13px] leading-5 text-[#f0f0f5] lg:w-72"
         >
-          <h2 className="font-semibold">{selectedCommit.data.headline}</h2>
-          <dl className="mt-4 space-y-3">
+          <h2 className="text-sm font-semibold leading-5">
+            {selectedCommit.data.headline}
+          </h2>
+          <dl className="mt-5 space-y-4">
             <div>
-              <dt className="text-[#a0a0b0]">Author</dt>
-              <dd>
+              <dt className="text-[11px] font-medium uppercase tracking-wide text-[#a0a0b0]">
+                Author
+              </dt>
+              <dd className="mt-0.5 break-words">
                 {selectedCommit.data.author.name} ({selectedCommit.data.author.email})
               </dd>
             </div>
             <div>
-              <dt className="text-[#a0a0b0]">Date</dt>
-              <dd>{dateFormatter.format(new Date(selectedCommit.data.committedDate))}</dd>
+              <dt className="text-[11px] font-medium uppercase tracking-wide text-[#a0a0b0]">
+                Date
+              </dt>
+              <dd className="mt-0.5">
+                {dateFormatter.format(new Date(selectedCommit.data.committedDate))}
+              </dd>
             </div>
             <div>
-              <dt className="text-[#a0a0b0]">Sacred Timeline</dt>
-              <dd>{selectedCommit.data.isDefaultBranch ? "Yes" : "No"}</dd>
+              <dt className="text-[11px] font-medium uppercase tracking-wide text-[#a0a0b0]">
+                Sacred Timeline
+              </dt>
+              <dd className="mt-0.5">
+                {selectedCommit.data.isDefaultBranch ? "Yes" : "No"}
+              </dd>
             </div>
             <div>
-              <dt className="text-[#a0a0b0]">Incursion Risk</dt>
-              <dd>{selectedCommit.data.riskScore}</dd>
+              <dt className="text-[11px] font-medium uppercase tracking-wide text-[#a0a0b0]">
+                Incursion Risk
+              </dt>
+              <dd className="mt-0.5">{selectedCommit.data.riskScore}</dd>
             </div>
           </dl>
         </aside>

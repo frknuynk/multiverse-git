@@ -6,9 +6,13 @@ import type {
   MultiverseGraph,
   MultiverseNode,
 } from "@/types/multiverse";
+import { HIGH_RISK_THRESHOLD } from "@/lib/graph/risk";
 
 const COMMIT_LIMIT = 40;
 const BRANCH_LIMIT = 12;
+const VARIANT_HISTORY_LIMIT = 8;
+const STALE_VARIANT_AGE_DAYS = 45;
+const UNSTABLE_VARIANT_AGE_DAYS = 120;
 
 const repositoryQuery = `
   query RepositoryHistory(
@@ -16,6 +20,7 @@ const repositoryQuery = `
     $name: String!
     $commitLimit: Int!
     $branchLimit: Int!
+    $variantHistoryLimit: Int!
   ) {
     repository(owner: $owner, name: $name) {
       defaultBranchRef {
@@ -62,6 +67,24 @@ const repositoryQuery = `
                   oid
                 }
               }
+              history(first: $variantHistoryLimit) {
+                nodes {
+                  oid
+                  message
+                  messageHeadline
+                  committedDate
+                  url
+                  author {
+                    name
+                    email
+                  }
+                  parents(first: 2) {
+                    nodes {
+                      oid
+                    }
+                  }
+                }
+              }
             }
           }
         }
@@ -88,11 +111,16 @@ interface GitHubRepositoryResponse {
         target: { history: { nodes: GitHubCommit[] } } | null;
       } | null;
       refs: {
-        nodes: Array<{ name: string; target: GitHubCommit | null }>;
+        nodes: GitHubBranchRef[];
       };
     } | null;
   };
   errors?: Array<{ message: string }>;
+}
+
+interface GitHubBranchRef {
+  name: string;
+  target: (GitHubCommit & { history: { nodes: GitHubCommit[] } }) | null;
 }
 
 export interface GitHubRepository {
@@ -134,6 +162,7 @@ export async function fetchPublicRepositoryGraph(
         name: repository.name,
         commitLimit: COMMIT_LIMIT,
         branchLimit: BRANCH_LIMIT,
+        variantHistoryLimit: VARIANT_HISTORY_LIMIT,
       },
     }),
   });
@@ -157,105 +186,125 @@ export async function fetchPublicRepositoryGraph(
 
 function toMultiverseGraph(
   history: GitHubCommit[],
-  refs: Array<{ name: string; target: GitHubCommit | null }>,
+  refs: GitHubBranchRef[],
   defaultBranchName: string,
 ): MultiverseGraph {
-  const commitsByOid = new Map(history.map((commit) => [commit.oid, commit]));
-  const branchNamesByOid = new Map<string, string[]>();
-  const sacredTimelineOids = new Set(history.map((commit) => commit.oid));
+  const commitsByOid = new Map<string, GitHubCommit>();
+  const branchNamesByOid = new Map<string, Set<string>>();
+  const defaultTip = history[0];
+
+  addCommits(commitsByOid, history);
+  for (const ref of refs) {
+    if (ref.target) {
+      addCommits(commitsByOid, ref.target.history.nodes);
+    }
+  }
+
+  const sacredTimelineOids = walkFirstParent(defaultTip.oid, commitsByOid);
+  const includedOids = new Set(sacredTimelineOids);
   const tipOids = new Set<string>();
 
-  tipOids.add(history[0].oid);
-
-  for (const commit of history) {
-    branchNamesByOid.set(commit.oid, [defaultBranchName]);
-  }
-
-  for (const ref of refs) {
-    if (!ref.target) {
-      continue;
-    }
-
-    commitsByOid.set(ref.target.oid, ref.target);
-    tipOids.add(ref.target.oid);
-
-    const branches = branchNamesByOid.get(ref.target.oid) ?? [];
-    if (!branches.includes(ref.name)) {
-      branches.push(ref.name);
-    }
-    branchNamesByOid.set(ref.target.oid, branches);
-  }
-
-  const branches = refs.flatMap((ref) => {
-    if (!ref.target) {
-      return [];
-    }
-
-    const isDefault = ref.name === defaultBranchName;
-    const isOnSacredTimeline = sacredTimelineOids.has(ref.target.oid);
-    const riskScore = calculateBranchRisk(
-      ref.target,
-      isDefault,
-      isOnSacredTimeline,
-    );
-
-    return [
-      {
-        name: ref.name,
-        isDefault,
-        tipOid: ref.target.oid,
-        aheadBy: isOnSacredTimeline ? 0 : 1,
-        riskScore,
-        color: isDefault ? "#f5a623" : riskScore >= 60 ? "#ef4444" : "#22d3ee",
-      } satisfies BranchInfo,
-    ];
-  });
-
-  if (!branches.some((branch) => branch.isDefault)) {
-    branches.unshift({
+  tipOids.add(defaultTip.oid);
+  const branches: BranchInfo[] = [
+    {
       name: defaultBranchName,
       isDefault: true,
-      tipOid: history[0].oid,
+      tipOid: defaultTip.oid,
       aheadBy: 0,
       riskScore: 0,
       color: "#f5a623",
+    },
+  ];
+
+  for (const ref of refs) {
+    const tip = ref.target;
+    if (!tip || ref.name === defaultBranchName) {
+      continue;
+    }
+
+    const variantPath = walkVariantPath(tip.oid, commitsByOid, sacredTimelineOids);
+    if (variantPath.oids.size === 0) {
+      continue;
+    }
+
+    tipOids.add(tip.oid);
+    for (const oid of variantPath.oids) {
+      includedOids.add(oid);
+      const branchNames = branchNamesByOid.get(oid) ?? new Set<string>();
+      branchNames.add(ref.name);
+      branchNamesByOid.set(oid, branchNames);
+    }
+
+    const riskScore = calculateBranchRisk(tip, variantPath, commitsByOid);
+    branches.push({
+      name: ref.name,
+      isDefault: false,
+      tipOid: tip.oid,
+      aheadBy: variantPath.oids.size,
+      riskScore,
+      color: riskScore >= HIGH_RISK_THRESHOLD ? "#ef4444" : "#22d3ee",
     });
+  }
+
+  for (const sacredOid of sacredTimelineOids) {
+    const sacredCommit = commitsByOid.get(sacredOid);
+    if (!sacredCommit || sacredCommit.parents.nodes.length < 2) {
+      continue;
+    }
+
+    for (const parent of sacredCommit.parents.nodes.slice(1)) {
+      const convergencePath = walkVariantPath(
+        parent.oid,
+        commitsByOid,
+        sacredTimelineOids,
+      );
+      for (const oid of convergencePath.oids) {
+        includedOids.add(oid);
+      }
+    }
   }
 
   const riskScoreByBranch = new Map(
     branches.map((branch) => [branch.name, branch.riskScore]),
   );
+  const nodes = Array.from(includedOids)
+    .map((oid) => commitsByOid.get(oid))
+    .filter((commit): commit is GitHubCommit => Boolean(commit))
+    .map((commit) => {
+      const branchNames = branchNamesByOid.get(commit.oid);
+      const isDefaultBranch = sacredTimelineOids.has(commit.oid);
+      const branchNamesList = branchNames
+        ? Array.from(branchNames)
+        : isDefaultBranch
+          ? [defaultBranchName]
+          : [];
+      const riskScore = Math.max(
+        0,
+        ...branchNamesList.map((branch) => riskScoreByBranch.get(branch) ?? 0),
+      );
 
-  const nodes = Array.from(commitsByOid.values()).map((commit) => {
-    const branches = branchNamesByOid.get(commit.oid) ?? [];
-    const isDefaultBranch = sacredTimelineOids.has(commit.oid);
-    const riskScore = Math.max(
-      0,
-      ...branches.map((branch) => riskScoreByBranch.get(branch) ?? 0),
-    );
-
-    return {
-      id: commit.oid,
-      data: {
-        message: commit.message,
-        headline: commit.messageHeadline,
-        author: commit.author ?? { name: "Unknown", email: "" },
-        committedDate: commit.committedDate,
-        parents: commit.parents.nodes.map((parent) => parent.oid),
-        branches,
-        isDefaultBranch,
-        isMerge: commit.parents.nodes.length > 1,
-        isNexus:
-          !isDefaultBranch &&
-          commit.parents.nodes.some((parent) => sacredTimelineOids.has(parent.oid)),
-        isTip: tipOids.has(commit.oid),
-        url: commit.url,
-        riskScore,
-      },
-      position: { x: 0, y: 0 },
-      type: "commit",
-    } satisfies MultiverseNode;
-  });
+      return {
+        id: commit.oid,
+        data: {
+          message: commit.message,
+          headline: commit.messageHeadline,
+          author: commit.author ?? { name: "Unknown", email: "" },
+          committedDate: commit.committedDate,
+          parents: commit.parents.nodes.map((parent) => parent.oid),
+          branches: branchNamesList,
+          isDefaultBranch,
+          isMerge: commit.parents.nodes.length > 1,
+          isNexus:
+            !isDefaultBranch &&
+            commit.parents.nodes.some((parent) => sacredTimelineOids.has(parent.oid)),
+          isTip: tipOids.has(commit.oid),
+          url: commit.url,
+          riskScore,
+        },
+        position: { x: 0, y: 0 },
+        type: "commit",
+      } satisfies MultiverseNode;
+    });
 
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
   const edges = nodes.flatMap((node) =>
@@ -265,13 +314,15 @@ function toMultiverseGraph(
       }
 
       const parent = nodeById.get(parentId);
-      const type: MultiverseEdge["type"] = node.data.isMerge
-        ? "convergence"
-        : node.data.isDefaultBranch && parent?.data.isDefaultBranch
+      const type: MultiverseEdge["type"] =
+        node.data.isDefaultBranch && parent?.data.isDefaultBranch
           ? "sacred"
-          : node.data.riskScore >= 60
+          : Math.max(node.data.riskScore, parent?.data.riskScore ?? 0) >=
+              HIGH_RISK_THRESHOLD
             ? "incursion"
-          : "variant";
+            : node.data.isMerge
+              ? "convergence"
+              : "variant";
 
       return [{ id: `${parentId}-${node.id}`, source: parentId, target: node.id, type }];
     }),
@@ -280,21 +331,95 @@ function toMultiverseGraph(
   return { nodes, edges, branches };
 }
 
-function calculateBranchRisk(
-  tip: GitHubCommit,
-  isDefaultBranch: boolean,
-  isOnSacredTimeline: boolean,
-): number {
-  if (isDefaultBranch || isOnSacredTimeline) {
-    return 0;
+function addCommits(
+  commitsByOid: Map<string, GitHubCommit>,
+  commits: GitHubCommit[],
+) {
+  for (const commit of commits) {
+    commitsByOid.set(commit.oid, commit);
+  }
+}
+
+function walkFirstParent(
+  startOid: string,
+  commitsByOid: Map<string, GitHubCommit>,
+): Set<string> {
+  const oids = new Set<string>();
+  let oid: string | undefined = startOid;
+
+  while (oid && !oids.has(oid)) {
+    oids.add(oid);
+    oid = commitsByOid.get(oid)?.parents.nodes[0]?.oid;
   }
 
+  return oids;
+}
+
+function walkVariantPath(
+  startOid: string,
+  commitsByOid: Map<string, GitHubCommit>,
+  sacredTimelineOids: Set<string>,
+): VariantPath {
+  const oids = new Set<string>();
+  let oid: string | undefined = startOid;
+
+  while (oid && !oids.has(oid) && !sacredTimelineOids.has(oid)) {
+    const commit = commitsByOid.get(oid);
+    if (!commit) {
+      break;
+    }
+
+    oids.add(oid);
+    oid = commit.parents.nodes[0]?.oid;
+  }
+
+  return { oids, hasSacredBase: Boolean(oid && sacredTimelineOids.has(oid)) };
+}
+
+function calculateBranchRisk(
+  tip: GitHubCommit,
+  variantPath: VariantPath,
+  commitsByOid: Map<string, GitHubCommit>,
+): number {
   const ageInDays = Math.max(
     0,
     Math.floor((Date.now() - Date.parse(tip.committedDate)) / 86_400_000),
   );
-  const stalenessRisk = Math.min(45, Math.floor(ageInDays / 7) * 4);
-  const mergeRisk = tip.parents.nodes.length > 1 ? 10 : 0;
+  const divergenceRisk = Math.min(
+    24,
+    Math.max(0, variantPath.oids.size - 3) * 3,
+  );
+  const stalenessRisk = Math.min(
+    24,
+    Math.floor(Math.max(0, ageInDays - STALE_VARIANT_AGE_DAYS) / 21) * 4,
+  );
+  const incompleteHistoryRisk = variantPath.hasSacredBase ? 0 : 6;
+  const authorCount = new Set(
+    Array.from(variantPath.oids, (oid) =>
+      commitsByOid.get(oid)?.author?.email.trim(),
+    ).filter((email): email is string => Boolean(email)),
+  ).size;
+  const authorRisk = Math.min(6, Math.max(0, authorCount - 2) * 3);
+  const mergeRisk = tip.parents.nodes.length > 1 ? 2 : 0;
+  const unstableVariantRisk =
+    !variantPath.hasSacredBase &&
+    variantPath.oids.size === VARIANT_HISTORY_LIMIT &&
+    ageInDays >= UNSTABLE_VARIANT_AGE_DAYS
+      ? 20
+      : 0;
 
-  return Math.min(100, 20 + stalenessRisk + mergeRisk);
+  return Math.min(
+    100,
+    divergenceRisk +
+      stalenessRisk +
+      incompleteHistoryRisk +
+      authorRisk +
+      mergeRisk +
+      unstableVariantRisk,
+  );
+}
+
+interface VariantPath {
+  oids: Set<string>;
+  hasSacredBase: boolean;
 }
