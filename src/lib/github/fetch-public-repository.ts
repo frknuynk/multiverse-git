@@ -13,6 +13,7 @@ const BRANCH_LIMIT = 12;
 const VARIANT_HISTORY_LIMIT = 8;
 const STALE_VARIANT_AGE_DAYS = 45;
 const UNSTABLE_VARIANT_AGE_DAYS = 120;
+const UNSTABLE_VARIANT_RISK = 35;
 
 const repositoryQuery = `
   query RepositoryHistory(
@@ -405,7 +406,7 @@ function calculateBranchRisk(
     !variantPath.hasSacredBase &&
     variantPath.oids.size === VARIANT_HISTORY_LIMIT &&
     ageInDays >= UNSTABLE_VARIANT_AGE_DAYS
-      ? 20
+      ? UNSTABLE_VARIANT_RISK
       : 0;
 
   return Math.min(

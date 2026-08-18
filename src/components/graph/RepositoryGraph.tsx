@@ -25,7 +25,7 @@ export async function RepositoryGraph({
   const graph = await loadRepositoryGraph(repository);
 
   if (graph) {
-    return <MultiverseCanvas initialGraph={graph} />;
+    return <MultiverseCanvas initialGraph={graph} isSampled />;
   }
 
   return (

@@ -60,9 +60,13 @@ const getMiniMapNodeColor = (node: CommitFlowNode) => {
 
 interface MultiverseCanvasProps {
   initialGraph?: MultiverseGraph;
+  isSampled?: boolean;
 }
 
-export function MultiverseCanvas({ initialGraph }: MultiverseCanvasProps) {
+export function MultiverseCanvas({
+  initialGraph,
+  isSampled = false,
+}: MultiverseCanvasProps) {
   const sourceGraph = initialGraph ?? fakeMultiverseGraph;
   const [graph, setGraph] = useState(sourceGraph);
   const [selectedCommitId, setSelectedCommitId] = useState<string | null>(null);
@@ -146,16 +150,23 @@ export function MultiverseCanvas({ initialGraph }: MultiverseCanvasProps) {
           onlyRenderVisibleElements
         >
           <Panel
-            className="m-3 flex items-center gap-3 border border-white/15 bg-[#12121d] px-3 py-2 text-xs text-[#f0f0f5]"
+            className="m-3 border border-white/15 bg-[#12121d] px-3 py-2 text-xs text-[#f0f0f5]"
             position="top-left"
           >
-            <span>
-              <strong className="font-semibold">{summary.commits}</strong> commits
-            </span>
-            <span className="h-3 border-l border-white/15" />
-            <span>
-              <strong className="font-semibold">{summary.variants}</strong> Variants
-            </span>
+            <div className="flex items-center gap-3">
+              <span>
+                <strong className="font-semibold">{summary.commits}</strong> commits
+              </span>
+              <span className="h-3 border-l border-white/15" />
+              <span>
+                <strong className="font-semibold">{summary.variants}</strong> Variants
+              </span>
+            </div>
+            {isSampled ? (
+              <p className="mt-1 text-[11px] text-[#a0a0b0]">
+                Sampled view · recent commits and Variants
+              </p>
+            ) : null}
           </Panel>
           <Controls aria-label="Canvas navigation" position="bottom-left" showInteractive={false} />
           <MiniMap<CommitFlowNode>
