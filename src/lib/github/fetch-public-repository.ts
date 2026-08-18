@@ -329,7 +329,49 @@ function toMultiverseGraph(
     }),
   );
 
-  return { nodes, edges, branches };
+  return keepConnectedTimeline(nodes, edges, branches);
+}
+
+function keepConnectedTimeline(
+  nodes: MultiverseNode[],
+  edges: MultiverseEdge[],
+  branches: BranchInfo[],
+): MultiverseGraph {
+  const connectedNodeIds = new Set(
+    nodes.filter((node) => node.data.isDefaultBranch).map((node) => node.id),
+  );
+  const adjacentNodeIds = new Map<string, string[]>();
+
+  for (const edge of edges) {
+    const sourceAdjacentNodeIds = adjacentNodeIds.get(edge.source) ?? [];
+    sourceAdjacentNodeIds.push(edge.target);
+    adjacentNodeIds.set(edge.source, sourceAdjacentNodeIds);
+
+    const targetAdjacentNodeIds = adjacentNodeIds.get(edge.target) ?? [];
+    targetAdjacentNodeIds.push(edge.source);
+    adjacentNodeIds.set(edge.target, targetAdjacentNodeIds);
+  }
+
+  const pendingNodeIds = Array.from(connectedNodeIds);
+  for (const nodeId of pendingNodeIds) {
+    for (const adjacentNodeId of adjacentNodeIds.get(nodeId) ?? []) {
+      if (!connectedNodeIds.has(adjacentNodeId)) {
+        connectedNodeIds.add(adjacentNodeId);
+        pendingNodeIds.push(adjacentNodeId);
+      }
+    }
+  }
+
+  return {
+    nodes: nodes.filter((node) => connectedNodeIds.has(node.id)),
+    edges: edges.filter(
+      (edge) =>
+        connectedNodeIds.has(edge.source) && connectedNodeIds.has(edge.target),
+    ),
+    branches: branches.filter(
+      (branch) => branch.isDefault || connectedNodeIds.has(branch.tipOid),
+    ),
+  };
 }
 
 function addCommits(

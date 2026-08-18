@@ -7,6 +7,7 @@ import {
   MiniMap,
   Panel,
   ReactFlow,
+  useReactFlow,
   useStore,
   useViewport,
   type Edge,
@@ -58,6 +59,7 @@ const MINI_MAP_HEIGHT = 96;
 const MINI_MAP_PADDING = 6;
 const FLOW_NODE_WIDTH = 180;
 const FLOW_NODE_HEIGHT = 44;
+const FIT_VIEW_OPTIONS = { padding: 0.16 };
 
 const getMiniMapNodeColor = (node: CommitFlowNode) => {
   if (node.data.isDefaultBranch) {
@@ -231,6 +233,26 @@ function formatCommitDate(committedDate: string) {
   return Number.isNaN(date.getTime()) ? "Unknown" : dateFormatter.format(date);
 }
 
+function FitGraphInView({ graph }: { graph: MultiverseGraph }) {
+  const { fitView, viewportInitialized } = useReactFlow<CommitFlowNode>();
+
+  useEffect(() => {
+    if (!viewportInitialized) {
+      return;
+    }
+
+    const frame = requestAnimationFrame(() => {
+      void fitView(FIT_VIEW_OPTIONS);
+    });
+
+    return () => {
+      cancelAnimationFrame(frame);
+    };
+  }, [fitView, graph, viewportInitialized]);
+
+  return null;
+}
+
 interface MultiverseCanvasProps {
   initialGraph?: MultiverseGraph;
   isSampled?: boolean;
@@ -344,6 +366,7 @@ export function MultiverseCanvas({
           }
           onlyRenderVisibleElements
         >
+          <FitGraphInView graph={graph} />
           <Panel
             className="m-3 border border-white/15 bg-[#12121d] px-3 py-2 text-xs text-[#f0f0f5]"
             position="top-left"
@@ -359,7 +382,7 @@ export function MultiverseCanvas({
             </div>
             {isSampledView ? (
               <p className="mt-1 text-[11px] text-[#a0a0b0]">
-                Sampled view · recent commits and Variants
+                Sampled view · connected recent commits and Variants
               </p>
             ) : null}
           </Panel>

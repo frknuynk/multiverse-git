@@ -25,7 +25,13 @@ export async function RepositoryGraph({
   const graph = await loadRepositoryGraph(repository);
 
   if (graph) {
-    return <MultiverseCanvas initialGraph={graph} isSampled />;
+    return (
+      <MultiverseCanvas
+        initialGraph={graph}
+        isSampled
+        key={`${repository.owner}/${repository.name}`}
+      />
+    );
   }
 
   return (
