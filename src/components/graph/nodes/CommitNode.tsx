@@ -40,7 +40,7 @@ export const CommitNode = memo(function CommitNode({
 
   return (
     <div
-      className={`w-full rounded-sm border px-3 py-2 text-zinc-900 ${backgroundClass} ${borderClass}`}
+      className={`w-full rounded-sm border px-3 py-2 text-zinc-900 transition-colors duration-150 ease-out motion-reduce:transition-none ${backgroundClass} ${borderClass}`}
     >
       <Handle
         className={`!h-2 !w-2 !border-0 ${handleClass}`}

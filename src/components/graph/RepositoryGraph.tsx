@@ -52,6 +52,11 @@ async function loadRepositoryGraph(
 ): Promise<MultiverseGraph | null> {
   try {
     const graph = await fetchPublicRepositoryGraph(repository);
+
+    if (graph.nodes.length === 0) {
+      throw new Error("GitHub returned no commits for this repository");
+    }
+
     console.info(
       `[Multiverse Git] Loaded real GitHub data from ${repository.owner}/${repository.name}.`,
     );
