@@ -16,6 +16,11 @@ const suggestedRepositories = [
   "microsoft/vscode",
   "nodejs/node",
   "storybookjs/storybook",
+  "microsoft/TypeScript",
+  "kubernetes/kubernetes",
+  "rust-lang/rust",
+  "flutter/flutter",
+  "vitejs/vite",
 ];
 
 export default async function Home({ searchParams }: HomeProps) {
@@ -33,8 +38,14 @@ export default async function Home({ searchParams }: HomeProps) {
     : undefined;
 
   return (
-    <main className="min-h-screen bg-[#05050a] text-[#f0f0f5]">
-      <header className="border-b border-white/10">
+    <main
+      className="min-h-screen bg-[#05050a] text-[#f0f0f5]"
+      style={{
+        backgroundImage:
+          "radial-gradient(ellipse at 50% -12%, rgba(35, 40, 54, 0.24) 0%, rgba(5, 5, 10, 0) 46%)",
+      }}
+    >
+      <header className="border-b border-[#292b37] bg-[#08090f] shadow-[inset_0_-1px_0_rgba(245,166,35,0.08)]">
         <div className="mx-auto max-w-[1600px] px-4 py-3 sm:px-6 lg:px-8">
           <div className="flex min-h-9 flex-wrap items-center gap-3">
             <h1 className="text-lg font-semibold tracking-tight">Multiverse Git</h1>

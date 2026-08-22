@@ -7,13 +7,36 @@ import type {
   MultiverseNode,
 } from "@/types/multiverse";
 import { HIGH_RISK_THRESHOLD } from "@/lib/graph/risk";
+import { selectVariantRefs } from "@/lib/github/select-recent-variant-refs";
 
 const COMMIT_LIMIT = 40;
 const BRANCH_LIMIT = 12;
-const VARIANT_HISTORY_LIMIT = 8;
+const OPEN_PULL_REQUEST_LIMIT = 10;
+const VARIANT_TIP_LIMIT = 10;
+const VARIANT_CONNECTION_PRIORITY_LIMIT = 4;
+const VARIANT_WALK_COMMIT_CAP = 22;
+const VARIANT_WALK_BATCH_DEPTH = 5;
+const GLOBAL_COMMIT_LIMIT = 150;
 const STALE_VARIANT_AGE_DAYS = 45;
 const UNSTABLE_VARIANT_AGE_DAYS = 120;
 const UNSTABLE_VARIANT_RISK = 35;
+
+const commitFields = `
+  oid
+  message
+  messageHeadline
+  committedDate
+  url
+  author {
+    name
+    email
+  }
+  parents(first: 2) {
+    nodes {
+      oid
+    }
+  }
+`;
 
 const repositoryQuery = `
   query RepositoryHistory(
@@ -21,7 +44,7 @@ const repositoryQuery = `
     $name: String!
     $commitLimit: Int!
     $branchLimit: Int!
-    $variantHistoryLimit: Int!
+    $pullRequestLimit: Int!
   ) {
     repository(owner: $owner, name: $name) {
       defaultBranchRef {
@@ -30,20 +53,7 @@ const repositoryQuery = `
           ... on Commit {
             history(first: $commitLimit) {
               nodes {
-                oid
-                message
-                messageHeadline
-                committedDate
-                url
-                author {
-                  name
-                  email
-                }
-                parents(first: 2) {
-                  nodes {
-                    oid
-                  }
-                }
+                ${commitFields}
               }
             }
           }
@@ -54,37 +64,22 @@ const repositoryQuery = `
           name
           target {
             ... on Commit {
-              oid
-              message
-              messageHeadline
-              committedDate
-              url
-              author {
-                name
-                email
-              }
-              parents(first: 2) {
-                nodes {
-                  oid
-                }
-              }
-              history(first: $variantHistoryLimit) {
-                nodes {
-                  oid
-                  message
-                  messageHeadline
-                  committedDate
-                  url
-                  author {
-                    name
-                    email
-                  }
-                  parents(first: 2) {
-                    nodes {
-                      oid
-                    }
-                  }
-                }
+              ${commitFields}
+            }
+          }
+        }
+      }
+      pullRequests(
+        first: $pullRequestLimit
+        states: OPEN
+        orderBy: { field: UPDATED_AT, direction: DESC }
+      ) {
+        nodes {
+          headRefName
+          headRef {
+            target {
+              ... on Commit {
+                ${commitFields}
               }
             }
           }
@@ -102,26 +97,36 @@ interface GitHubCommit {
   url: string;
   author: { name: string; email: string } | null;
   parents: { nodes: Array<{ oid: string }> };
+  firstParent?: { nodes: GitHubCommit[] };
 }
 
-interface GitHubRepositoryResponse {
-  data?: {
-    repository: {
-      defaultBranchRef: {
-        name: string;
-        target: { history: { nodes: GitHubCommit[] } } | null;
-      } | null;
-      refs: {
-        nodes: GitHubBranchRef[];
-      };
+interface GitHubRepositoryData {
+  repository: {
+    defaultBranchRef: {
+      name: string;
+      target: { history: { nodes: GitHubCommit[] } } | null;
     } | null;
-  };
-  errors?: Array<{ message: string }>;
+    refs: {
+      nodes: GitHubBranchRef[];
+    };
+    pullRequests: {
+      nodes: GitHubPullRequest[];
+    };
+  } | null;
 }
 
 interface GitHubBranchRef {
   name: string;
-  target: (GitHubCommit & { history: { nodes: GitHubCommit[] } }) | null;
+  target: GitHubCommit | null;
+}
+
+interface GitHubPullRequest {
+  headRefName: string | null;
+  headRef: { target: GitHubCommit | null } | null;
+}
+
+interface GitHubVariantWalkResponse {
+  repository: Record<string, GitHubCommit | null> | null;
 }
 
 export interface GitHubRepository {
@@ -148,6 +153,38 @@ export function getConfiguredRepository(): GitHubRepository | null {
 export async function fetchPublicRepositoryGraph(
   repository: GitHubRepository,
 ): Promise<MultiverseGraph> {
+  const payload = await fetchGitHubGraphQL<GitHubRepositoryData>(
+    repositoryQuery,
+    {
+      owner: repository.owner,
+      name: repository.name,
+      commitLimit: COMMIT_LIMIT,
+      branchLimit: BRANCH_LIMIT,
+      pullRequestLimit: OPEN_PULL_REQUEST_LIMIT,
+    },
+  );
+
+  const githubRepository = payload.repository;
+  const defaultBranch = githubRepository?.defaultBranchRef;
+  const history = defaultBranch?.target?.history.nodes;
+
+  if (!githubRepository || !defaultBranch || !history?.length) {
+    throw new Error("The repository has no accessible default branch history");
+  }
+
+  return toMultiverseGraph(
+    repository,
+    history,
+    githubRepository.refs.nodes,
+    githubRepository.pullRequests.nodes,
+    defaultBranch.name,
+  );
+}
+
+async function fetchGitHubGraphQL<T>(
+  query: string,
+  variables: Record<string, string | number>,
+): Promise<T> {
   const token = process.env.GITHUB_TOKEN;
   const response = await fetch("https://api.github.com/graphql", {
     method: "POST",
@@ -156,54 +193,51 @@ export async function fetchPublicRepositoryGraph(
       "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({
-      query: repositoryQuery,
-      variables: {
-        owner: repository.owner,
-        name: repository.name,
-        commitLimit: COMMIT_LIMIT,
-        branchLimit: BRANCH_LIMIT,
-        variantHistoryLimit: VARIANT_HISTORY_LIMIT,
-      },
-    }),
+    body: JSON.stringify({ query, variables }),
   });
 
-  const payload = (await response.json()) as GitHubRepositoryResponse;
+  const payload = (await response.json()) as {
+    data?: T;
+    errors?: Array<{ message: string }>;
+  };
 
   if (!response.ok || payload.errors?.length) {
     throw new Error(payload.errors?.[0]?.message ?? "GitHub request failed");
   }
 
-  const githubRepository = payload.data?.repository;
-  const defaultBranch = githubRepository?.defaultBranchRef;
-  const history = defaultBranch?.target?.history.nodes;
-
-  if (!githubRepository || !defaultBranch || !history?.length) {
-    throw new Error("The repository has no accessible default branch history");
+  if (!payload.data) {
+    throw new Error("GitHub returned no data");
   }
 
-  return toMultiverseGraph(history, githubRepository.refs.nodes, defaultBranch.name);
+  return payload.data;
 }
 
-function toMultiverseGraph(
+async function toMultiverseGraph(
+  repository: GitHubRepository,
   history: GitHubCommit[],
   refs: GitHubBranchRef[],
+  pullRequests: GitHubPullRequest[],
   defaultBranchName: string,
-): MultiverseGraph {
+): Promise<MultiverseGraph> {
   const commitsByOid = new Map<string, GitHubCommit>();
   const branchNamesByOid = new Map<string, Set<string>>();
   const defaultTip = history[0];
 
   addCommits(commitsByOid, history);
-  for (const ref of refs) {
-    if (ref.target) {
-      addCommits(commitsByOid, ref.target.history.nodes);
-    }
-  }
-
   const sacredTimelineOids = walkFirstParent(defaultTip.oid, commitsByOid);
   const includedOids = new Set(sacredTimelineOids);
   const tipOids = new Set<string>();
+  const sampledVariants = await sampleVariantHistories(
+    repository,
+    selectVariantRefs(
+      getPullRequestVariantRefs(pullRequests),
+      refs,
+      defaultBranchName,
+      VARIANT_TIP_LIMIT,
+    ),
+    commitsByOid,
+    sacredTimelineOids,
+  );
 
   tipOids.add(defaultTip.oid);
   const branches: BranchInfo[] = [
@@ -217,28 +251,20 @@ function toMultiverseGraph(
     },
   ];
 
-  for (const ref of refs) {
-    const tip = ref.target;
-    if (!tip || ref.name === defaultBranchName) {
-      continue;
-    }
-
-    const variantPath = walkVariantPath(tip.oid, commitsByOid, sacredTimelineOids);
-    if (variantPath.oids.size === 0) {
-      continue;
-    }
+  for (const sampledVariant of sampledVariants) {
+    const { name, tip, variantPath } = sampledVariant;
 
     tipOids.add(tip.oid);
     for (const oid of variantPath.oids) {
       includedOids.add(oid);
       const branchNames = branchNamesByOid.get(oid) ?? new Set<string>();
-      branchNames.add(ref.name);
+      branchNames.add(name);
       branchNamesByOid.set(oid, branchNames);
     }
 
     const riskScore = calculateBranchRisk(tip, variantPath, commitsByOid);
     branches.push({
-      name: ref.name,
+      name,
       isDefault: false,
       tipOid: tip.oid,
       aheadBy: variantPath.oids.size,
@@ -330,6 +356,266 @@ function toMultiverseGraph(
   );
 
   return keepConnectedTimeline(nodes, edges, branches);
+}
+
+function getPullRequestVariantRefs(
+  pullRequests: GitHubPullRequest[],
+): GitHubBranchRef[] {
+  return pullRequests.flatMap((pullRequest) => {
+    if (!pullRequest.headRefName || !pullRequest.headRef?.target) {
+      return [];
+    }
+
+    return [
+      {
+        name: pullRequest.headRefName,
+        target: pullRequest.headRef.target,
+      },
+    ];
+  });
+}
+
+async function sampleVariantHistories(
+  repository: GitHubRepository,
+  refs: GitHubBranchRef[],
+  commitsByOid: Map<string, GitHubCommit>,
+  sacredTimelineOids: Set<string>,
+): Promise<SampledVariant[]> {
+  const states: VariantWalkState[] = [];
+
+  for (const ref of refs) {
+    const tip = ref.target;
+    if (!tip || sacredTimelineOids.has(tip.oid)) {
+      continue;
+    }
+
+    if (!commitsByOid.has(tip.oid)) {
+      if (commitsByOid.size >= GLOBAL_COMMIT_LIMIT) {
+        break;
+      }
+
+      commitsByOid.set(tip.oid, tip);
+    }
+
+    const firstParentOid = tip.parents.nodes[0]?.oid;
+    const variantPath: VariantPath = {
+      hasSacredBase: Boolean(firstParentOid && sacredTimelineOids.has(firstParentOid)),
+      oids: new Set([tip.oid]),
+    };
+
+    states.push({
+      name: ref.name,
+      nextOid: variantPath.hasSacredBase ? undefined : firstParentOid,
+      tip,
+      variantPath,
+    });
+  }
+
+  let nextStateIndex = 0;
+  const priorityStates = states.slice(0, VARIANT_CONNECTION_PRIORITY_LIMIT);
+
+  while (commitsByOid.size < GLOBAL_COMMIT_LIMIT) {
+    const activeStates = states.filter(
+      (state) =>
+        Boolean(state.nextOid) &&
+        !state.variantPath.hasSacredBase &&
+        state.variantPath.oids.size < VARIANT_WALK_COMMIT_CAP,
+    );
+    const activePriorityStates = priorityStates.filter((state) =>
+      activeStates.includes(state),
+    );
+    const statesToPrioritize = activePriorityStates.length > 0
+      ? activePriorityStates
+      : activeStates;
+
+    if (statesToPrioritize.length === 0) {
+      break;
+    }
+
+    const remainingCommitBudget = GLOBAL_COMMIT_LIMIT - commitsByOid.size;
+    const remainingVariantBudget = Math.min(
+      ...statesToPrioritize.map(
+        (state) => VARIANT_WALK_COMMIT_CAP - state.variantPath.oids.size,
+      ),
+    );
+    const walkDepth = Math.min(
+      VARIANT_WALK_BATCH_DEPTH,
+      remainingCommitBudget,
+      remainingVariantBudget,
+    );
+    const batchSize = Math.min(
+      statesToPrioritize.length,
+      Math.floor(remainingCommitBudget / walkDepth),
+    );
+
+    if (batchSize === 0) {
+      break;
+    }
+
+    const statesToWalk = takeWalkBatch(
+      statesToPrioritize,
+      batchSize,
+      nextStateIndex,
+    );
+    nextStateIndex =
+      (nextStateIndex + statesToWalk.length) % statesToPrioritize.length;
+    const walkedCommits = await fetchVariantWalkBatch(
+      repository,
+      statesToWalk.map((state) => state.nextOid as string),
+      walkDepth,
+    );
+
+    for (let index = 0; index < statesToWalk.length; index += 1) {
+      const state = statesToWalk[index];
+      const walkedCommit = walkedCommits[index];
+
+      if (!walkedCommit) {
+        state.nextOid = undefined;
+        continue;
+      }
+
+      addWalkedCommits(
+        state,
+        walkedCommit,
+        walkDepth,
+        commitsByOid,
+        sacredTimelineOids,
+      );
+    }
+  }
+
+  return states;
+}
+
+function takeWalkBatch(
+  states: VariantWalkState[],
+  batchSize: number,
+  startIndex: number,
+): VariantWalkState[] {
+  return Array.from(
+    { length: batchSize },
+    (_, index) => states[(startIndex + index) % states.length],
+  );
+}
+
+function addWalkedCommits(
+  state: VariantWalkState,
+  initialCommit: GitHubCommit,
+  walkDepth: number,
+  commitsByOid: Map<string, GitHubCommit>,
+  sacredTimelineOids: Set<string>,
+) {
+  let commit: GitHubCommit | undefined = initialCommit;
+
+  for (let depth = 0; depth < walkDepth && commit; depth += 1) {
+    if (sacredTimelineOids.has(commit.oid)) {
+      state.variantPath.hasSacredBase = true;
+      state.nextOid = undefined;
+      return;
+    }
+
+    if (state.variantPath.oids.has(commit.oid)) {
+      state.nextOid = undefined;
+      return;
+    }
+
+    if (!commitsByOid.has(commit.oid)) {
+      if (commitsByOid.size >= GLOBAL_COMMIT_LIMIT) {
+        return;
+      }
+
+      commitsByOid.set(commit.oid, commit);
+    }
+
+    state.variantPath.oids.add(commit.oid);
+    const firstParentOid = commit.parents.nodes[0]?.oid;
+
+    if (firstParentOid && sacredTimelineOids.has(firstParentOid)) {
+      state.variantPath.hasSacredBase = true;
+      state.nextOid = undefined;
+      return;
+    }
+
+    if (
+      !firstParentOid ||
+      state.variantPath.oids.size >= VARIANT_WALK_COMMIT_CAP
+    ) {
+      state.nextOid = undefined;
+      return;
+    }
+
+    const firstParent: GitHubCommit | undefined = commit.firstParent?.nodes[0];
+    if (!firstParent) {
+      state.nextOid = firstParentOid;
+      return;
+    }
+
+    commit = firstParent;
+  }
+}
+
+async function fetchVariantWalkBatch(
+  repository: GitHubRepository,
+  startingOids: string[],
+  walkDepth: number,
+): Promise<Array<GitHubCommit | null>> {
+  const query = createVariantWalkQuery(startingOids.length, walkDepth);
+  const variables: Record<string, string | number> = {
+    name: repository.name,
+    owner: repository.owner,
+  };
+
+  for (const [index, oid] of startingOids.entries()) {
+    variables[`variant${index}`] = oid;
+  }
+
+  const payload = await fetchGitHubGraphQL<GitHubVariantWalkResponse>(
+    query,
+    variables,
+  );
+
+  return startingOids.map(
+    (_, index) => payload.repository?.[`variant${index}`] ?? null,
+  );
+}
+
+function createVariantWalkQuery(variantCount: number, walkDepth: number) {
+  const variantVariables = Array.from(
+    { length: variantCount },
+    (_, index) => `$variant${index}: String!`,
+  ).join(", ");
+  const variantObjects = Array.from(
+    { length: variantCount },
+    (_, index) => `
+      variant${index}: object(expression: $variant${index}) {
+        ... on Commit {
+          ${createFirstParentSelection(walkDepth)}
+        }
+      }
+    `,
+  ).join("\n");
+
+  return `
+    query VariantWalk($owner: String!, $name: String!, ${variantVariables}) {
+      repository(owner: $owner, name: $name) {
+        ${variantObjects}
+      }
+    }
+  `;
+}
+
+function createFirstParentSelection(depth: number): string {
+  const nextParent = depth > 1
+    ? `
+      firstParent: parents(first: 1) {
+        nodes {
+          ${createFirstParentSelection(depth - 1)}
+        }
+      }
+    `
+    : "";
+
+  return `${commitFields}${nextParent}`;
 }
 
 function keepConnectedTimeline(
@@ -445,8 +731,7 @@ function calculateBranchRisk(
   const authorRisk = Math.min(6, Math.max(0, authorCount - 2) * 3);
   const mergeRisk = tip.parents.nodes.length > 1 ? 2 : 0;
   const unstableVariantRisk =
-    !variantPath.hasSacredBase &&
-    variantPath.oids.size === VARIANT_HISTORY_LIMIT &&
+    variantPath.oids.size === VARIANT_WALK_COMMIT_CAP &&
     ageInDays >= UNSTABLE_VARIANT_AGE_DAYS
       ? UNSTABLE_VARIANT_RISK
       : 0;
@@ -465,4 +750,14 @@ function calculateBranchRisk(
 interface VariantPath {
   oids: Set<string>;
   hasSacredBase: boolean;
+}
+
+interface SampledVariant {
+  name: string;
+  tip: GitHubCommit;
+  variantPath: VariantPath;
+}
+
+interface VariantWalkState extends SampledVariant {
+  nextOid?: string;
 }

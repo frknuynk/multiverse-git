@@ -1,6 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   Controls,
@@ -18,9 +24,18 @@ import {
   CommitNode,
   type CommitFlowNode,
 } from "@/components/graph/nodes/CommitNode";
+import {
+  TimelineEdge,
+  type TimelineFlowEdge,
+} from "@/components/graph/edges/TimelineEdge";
 import { fakeMultiverseGraph } from "@/lib/graph/fake-multiverse-graph";
 import { layoutMultiverseGraph } from "@/lib/graph/layout";
 import { getRiskLevel } from "@/lib/graph/risk";
+import { getCommitFocus } from "@/lib/graph/commit-focus";
+import {
+  getVariantContexts,
+  type VariantContextInfo,
+} from "@/lib/graph/variant-context";
 import type { MultiverseEdge, MultiverseGraph } from "@/types/multiverse";
 
 const getEdgeStyle = (
@@ -54,12 +69,16 @@ const dateFormatter = new Intl.DateTimeFormat(undefined, {
 });
 
 const nodeTypes = { commit: CommitNode };
+const edgeTypes = { timeline: TimelineEdge };
 const MINI_MAP_WIDTH = 176;
 const MINI_MAP_HEIGHT = 96;
 const MINI_MAP_PADDING = 6;
 const FLOW_NODE_WIDTH = 180;
 const FLOW_NODE_HEIGHT = 44;
-const FIT_VIEW_OPTIONS = { padding: 0.16 };
+// Keep the complete connected sample in frame while using the available canvas
+// area more efficiently. A lower padding improves label scanability without
+// hiding the outer Variant tips.
+const FIT_VIEW_OPTIONS = { padding: 0.08 };
 
 const getMiniMapNodeColor = (node: CommitFlowNode) => {
   if (node.data.isDefaultBranch) {
@@ -233,6 +252,20 @@ function formatCommitDate(committedDate: string) {
   return Number.isNaN(date.getTime()) ? "Unknown" : dateFormatter.format(date);
 }
 
+function formatRiskLevel(riskScore: number) {
+  const riskLevel = getRiskLevel(riskScore);
+
+  if (riskLevel === "high") {
+    return "High";
+  }
+
+  if (riskLevel === "medium") {
+    return "Medium";
+  }
+
+  return "Healthy";
+}
+
 function FitGraphInView({ graph }: { graph: MultiverseGraph }) {
   const { fitView, viewportInitialized } = useReactFlow<CommitFlowNode>();
 
@@ -271,6 +304,31 @@ export function MultiverseCanvas({
   const [selectedCommitId, setSelectedCommitId] = useState<string | null>(null);
   const shouldReduceMotion = useReducedMotion();
 
+  const selectCommit = useCallback((commitId: string) => {
+    setSelectedCommitId((current) => (current === commitId ? current : commitId));
+  }, []);
+
+  const handleFlowKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (event.key !== "Enter" && event.key !== " ") {
+        return;
+      }
+
+      const nodeElement = (event.target as HTMLElement).closest<HTMLElement>(
+        ".react-flow__node[data-id]",
+      );
+      const commitId = nodeElement?.dataset.id;
+
+      if (!commitId) {
+        return;
+      }
+
+      event.preventDefault();
+      selectCommit(commitId);
+    },
+    [selectCommit],
+  );
+
   useEffect(() => {
     let cancelled = false;
 
@@ -295,6 +353,15 @@ export function MultiverseCanvas({
     () => new Map(graph.nodes.map((node) => [node.id, node.data.riskScore])),
     [graph.nodes],
   );
+  const selectedCommit = useMemo(
+    () => graph.nodes.find((node) => node.id === selectedCommitId),
+    [graph.nodes, selectedCommitId],
+  );
+  const commitFocus = useMemo(
+    () => getCommitFocus(graph, selectedCommitId),
+    [graph, selectedCommitId],
+  );
+  const hasCommitFocus = commitFocus.kind !== "none";
 
   const nodes = useMemo<CommitFlowNode[]>(
     () =>
@@ -304,7 +371,10 @@ export function MultiverseCanvas({
         data: {
           authorName: node.data.author.name,
           headline: node.data.headline,
+          isDimmed:
+            hasCommitFocus && !commitFocus.emphasizedNodeIds.has(node.id),
           isDefaultBranch: node.data.isDefaultBranch,
+          isEmphasized: commitFocus.emphasizedNodeIds.has(node.id),
           riskScore: node.data.riskScore,
         },
         position: node.position,
@@ -312,23 +382,34 @@ export function MultiverseCanvas({
         style: { width: 180 },
         type: "commit",
       })),
-    [graph.nodes, selectedCommitId],
+    [commitFocus.emphasizedNodeIds, graph.nodes, hasCommitFocus, selectedCommitId],
   );
 
-  const edges = useMemo<Edge[]>(
+  const edges = useMemo<TimelineFlowEdge[]>(
     () =>
       graph.edges.map((edge) => ({
+        data: {
+          isEmphasized: commitFocus.emphasizedEdgeIds.has(edge.id),
+          isSacred: edge.type === "sacred",
+        },
         id: edge.id,
         source: edge.source,
         target: edge.target,
-        style: getEdgeStyle(edge, riskScoreByNode),
+        style: {
+          ...getEdgeStyle(edge, riskScoreByNode),
+          opacity: hasCommitFocus && !commitFocus.emphasizedEdgeIds.has(edge.id)
+            ? edge.type === "sacred"
+              ? 0.55
+              : 0.28
+            : 1,
+        },
+        type: "timeline",
       })),
-    [graph.edges, riskScoreByNode],
+    [commitFocus.emphasizedEdgeIds, graph.edges, hasCommitFocus, riskScoreByNode],
   );
-
-  const selectedCommit = useMemo(
-    () => graph.nodes.find((node) => node.id === selectedCommitId),
-    [graph.nodes, selectedCommitId],
+  const variantContexts = useMemo(
+    () => getVariantContexts(graph, selectedCommitId),
+    [graph, selectedCommitId],
   );
   const summary = useMemo(
     () => ({
@@ -342,25 +423,34 @@ export function MultiverseCanvas({
     <div className="flex flex-col gap-4 lg:flex-row">
       <motion.div
         animate={{ opacity: 1, y: 0 }}
-        className="h-[600px] min-w-0 flex-1 overflow-hidden border border-white/10 bg-[#0c0c14]"
+        className="min-w-0 overflow-hidden border border-[#303240] bg-[#0c0c14] lg:flex-1"
         initial={shouldReduceMotion ? false : { opacity: 0, y: 4 }}
+        style={{
+          backgroundImage:
+            "radial-gradient(ellipse at 48% 42%, rgba(36, 45, 64, 0.28) 0%, rgba(12, 12, 20, 0) 62%), linear-gradient(180deg, #0c0c14 0%, #08090f 100%)",
+          // React Flow requires an explicit parent height. This clamp preserves
+          // a usable canvas on compact viewports and the established 600px
+          // desktop composition without relying on generated utility CSS.
+          height: "clamp(26rem, 68vh, 37.5rem)",
+        }}
         transition={{ duration: shouldReduceMotion ? 0 : 0.18, ease: "easeOut" }}
       >
-        <ReactFlow<CommitFlowNode>
-          className="bg-[#0c0c14]"
+        <ReactFlow<CommitFlowNode, TimelineFlowEdge>
+          className="bg-transparent"
           colorMode="dark"
           edges={edges}
+          edgeTypes={edgeTypes}
           fitView
+          fitViewOptions={FIT_VIEW_OPTIONS}
           nodes={nodes}
           nodesConnectable={false}
           nodesDraggable={false}
           nodeTypes={nodeTypes}
           onNodeClick={(event, node) => {
             event.stopPropagation();
-            setSelectedCommitId((current) =>
-              current === node.id ? current : node.id,
-            );
+            selectCommit(node.id);
           }}
+          onKeyDown={handleFlowKeyDown}
           onPaneClick={() =>
             setSelectedCommitId((current) => (current ? null : current))
           }
@@ -368,7 +458,7 @@ export function MultiverseCanvas({
         >
           <FitGraphInView graph={graph} />
           <Panel
-            className="m-3 border border-white/15 bg-[#12121d] px-3 py-2 text-xs text-[#f0f0f5]"
+            className="m-3 border border-[#3b3d4c] bg-[#10111a] px-3 py-2 text-xs text-[#f0f0f5] shadow-[inset_0_1px_0_rgba(245,166,35,0.1)]"
             position="top-left"
           >
             <div className="flex items-center gap-3">
@@ -382,7 +472,15 @@ export function MultiverseCanvas({
             </div>
             {isSampledView ? (
               <p className="mt-1 text-[11px] text-[#a0a0b0]">
-                Sampled view · connected recent commits and Variants
+                Connected sample of recent commits and Variants
+              </p>
+            ) : null}
+            {commitFocus.kind === "variant" && commitFocus.branchName ? (
+              <p
+                className="mt-1 max-w-80 text-[11px] text-[#c8d2df]"
+                title={`Viewing Variant: ${commitFocus.branchName}. Click canvas to reset.`}
+              >
+                Viewing Variant: {commitFocus.branchName} · Click canvas to reset
               </p>
             ) : null}
           </Panel>
@@ -411,7 +509,7 @@ export function MultiverseCanvas({
           <motion.aside
             animate={{ opacity: 1, x: 0 }}
             aria-live="polite"
-            className="w-full border border-white/15 bg-[#12121d] p-5 text-[13px] leading-5 text-[#f0f0f5] lg:w-72"
+            className="w-full border border-[#3b3d4c] bg-[#10111a] p-5 text-[13px] leading-5 text-[#f0f0f5] shadow-[inset_0_1px_0_rgba(245,166,35,0.1)] lg:w-72"
             exit={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, x: 6 }}
             initial={shouldReduceMotion ? false : { opacity: 0, x: 6 }}
             transition={{ duration: shouldReduceMotion ? 0 : 0.14, ease: "easeOut" }}
@@ -450,10 +548,49 @@ export function MultiverseCanvas({
                 </dt>
                 <dd className="mt-0.5">{selectedCommit.data.riskScore}</dd>
               </div>
+              {variantContexts.length > 0 ? (
+                <div className="border-t border-white/10 pt-4">
+                  <dt className="text-[11px] font-medium uppercase tracking-wide text-[#a0a0b0]">
+                    Variant Context
+                  </dt>
+                  <dd className="mt-2 space-y-3">
+                    {variantContexts.map((context, index) => (
+                      <VariantContext
+                        context={context}
+                        key={context.branchName ?? `unnamed-variant-${index}`}
+                      />
+                    ))}
+                  </dd>
+                </div>
+              ) : null}
             </dl>
           </motion.aside>
         ) : null}
       </AnimatePresence>
+    </div>
+  );
+}
+
+function VariantContext({ context }: { context: VariantContextInfo }) {
+  return (
+    <div className="border-l-2 border-[#22d3ee] pl-3">
+      <p
+        className="truncate font-medium text-[#f0f0f5]"
+        title={context.branchName ?? undefined}
+      >
+        {context.branchName ?? "Variant name unavailable"}
+      </p>
+      <p className="mt-0.5 text-xs text-[#a0a0b0]">
+        {context.commitsShown} commits shown in this sample
+      </p>
+      <p className="mt-0.5 text-xs text-[#a0a0b0]">
+        {context.connectsToSacredTimeline
+          ? "Connected to Sacred Timeline"
+          : "Not connected to Sacred Timeline"}
+      </p>
+      <p className="mt-0.5 text-xs text-[#a0a0b0]">
+        Risk level: {formatRiskLevel(context.riskScore)}
+      </p>
     </div>
   );
 }

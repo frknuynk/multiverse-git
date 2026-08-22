@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build --webpack",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --no-warnings --test --experimental-strip-types src/lib/graph/variant-context.test.mts src/lib/github/select-recent-variant-refs.test.mts"
   },
   "dependencies": {
     "@xyflow/react": "^12.11.3",

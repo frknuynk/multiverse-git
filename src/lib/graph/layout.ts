@@ -6,8 +6,8 @@ const elk = new ELK();
 
 const NODE_WIDTH = 180;
 const NODE_HEIGHT = 44;
-const VARIANT_DEPTH_SPACING = 18;
-const MAX_VARIANT_DEPTH_OFFSET = 4;
+const VARIANT_DEPTH_SPACING = 12;
+const MAX_VARIANT_DEPTH_OFFSET = 3;
 
 const sacredEdgeLayoutOptions = {
   "elk.layered.priority.shortness": "10",
@@ -30,9 +30,9 @@ export async function layoutMultiverseGraph(
       "elk.layered.nodePlacement.favorStraightEdges": "false",
       "elk.layered.mergeEdges": "true",
       "elk.layered.unnecessaryBendpoints": "true",
-      "elk.layered.spacing.edgeNodeBetweenLayers": "40",
-      "elk.layered.spacing.nodeNodeBetweenLayers": "120",
-      "elk.spacing.nodeNode": "110",
+      "elk.layered.spacing.edgeNodeBetweenLayers": "24",
+      "elk.layered.spacing.nodeNodeBetweenLayers": "84",
+      "elk.spacing.nodeNode": "64",
     },
     children: graph.nodes.map((node) => ({
       id: node.id,

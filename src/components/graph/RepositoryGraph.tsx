@@ -63,16 +63,8 @@ async function loadRepositoryGraph(
       throw new Error("GitHub returned no commits for this repository");
     }
 
-    console.info(
-      `[Multiverse Git] Loaded real GitHub data from ${repository.owner}/${repository.name}.`,
-    );
-
     return graph;
   } catch {
-    console.warn(
-      `[Multiverse Git] Could not load ${repository.owner}/${repository.name}; using fake graph data.`,
-    );
-
     return null;
   }
 }

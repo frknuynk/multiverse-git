@@ -6,7 +6,9 @@ import { getRiskLevel } from "@/lib/graph/risk";
 export interface CommitNodeData extends Record<string, unknown> {
   headline: string;
   authorName: string;
+  isDimmed: boolean;
   isDefaultBranch: boolean;
+  isEmphasized: boolean;
   riskScore: number;
 }
 
@@ -18,18 +20,27 @@ export const CommitNode = memo(function CommitNode({
 }: NodeProps<CommitFlowNode>) {
   const riskLevel = getRiskLevel(data.riskScore);
   const isHighRisk = riskLevel === "high";
-  const backgroundClass = data.isDefaultBranch
-    ? "bg-[#fff8eb]"
-    : riskLevel === "medium"
-      ? "bg-[#faf7ff]"
-      : "bg-[#f4fcff]";
-  const borderClass = selected
-    ? "border-2 border-[#f5a623]"
-    : data.isDefaultBranch
-      ? "border-[#f5a623]"
+  const backgroundClass = data.isDimmed
+    ? "bg-[#0c0e14]"
+    : data.isEmphasized || selected
+      ? "bg-[#151a24]"
+      : "bg-[#11141d]";
+  const borderClass = data.isDefaultBranch
+    ? "border-[#f5a623]/85"
+    : isHighRisk
+      ? "border-red-500/85"
       : riskLevel === "medium"
-        ? "border-violet-400"
-        : "border-cyan-400";
+        ? "border-violet-400/85"
+        : "border-cyan-400/85";
+  const ambientRimClass = selected
+    ? "ring-2 ring-[#f7d48a]/80 ring-offset-1 ring-offset-[#08090e]"
+    : data.isEmphasized
+      ? "ring-1 ring-white/35"
+      : data.isDefaultBranch
+        ? "shadow-[0_0_10px_rgba(245,166,35,0.16)]"
+        : isHighRisk
+          ? "shadow-[0_0_10px_rgba(239,68,68,0.14)]"
+          : "";
   const handleClass = data.isDefaultBranch
     ? "!bg-[#d8901f]"
     : riskLevel === "medium"
@@ -40,7 +51,7 @@ export const CommitNode = memo(function CommitNode({
 
   return (
     <div
-      className={`w-full rounded-sm border px-3 py-2 text-zinc-900 transition-colors duration-150 ease-out motion-reduce:transition-none ${backgroundClass} ${borderClass}`}
+      className={`w-full rounded-sm border px-3 py-2 text-[#f0f0f5] transition-colors duration-150 ease-out motion-reduce:transition-none ${backgroundClass} ${borderClass} ${ambientRimClass}`}
     >
       <Handle
         className={`!h-2 !w-2 !border-0 ${handleClass}`}
@@ -51,7 +62,7 @@ export const CommitNode = memo(function CommitNode({
         {data.headline}
       </p>
       <div className="mt-1 flex items-center gap-2 text-[11px] leading-3">
-        <p className="min-w-0 truncate text-zinc-600" title={data.authorName}>
+        <p className="min-w-0 truncate text-[#aeb6c4]" title={data.authorName}>
           {data.authorName}
         </p>
         {isHighRisk ? (
