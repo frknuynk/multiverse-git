@@ -7,7 +7,7 @@
     "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --no-warnings --test --experimental-strip-types src/lib/graph/variant-context.test.mts src/lib/github/select-recent-variant-refs.test.mts"
+    "test": "node --no-warnings --test --experimental-strip-types src/lib/graph/semantic-zoom.test.mts src/lib/graph/shared-graph-view.test.mts src/lib/graph/timeline-brief.test.mts src/lib/graph/timeline-peek.test.mts src/lib/graph/variant-context.test.mts src/lib/graph/variant-investigation.test.mts src/lib/graph/variant-navigator.test.mts src/lib/graph/timeline-window.test.mts src/lib/github/parse-github-repository.test.mts src/lib/github/select-recent-variant-refs.test.mts"
   },
   "dependencies": {
     "@xyflow/react": "^12.11.3",

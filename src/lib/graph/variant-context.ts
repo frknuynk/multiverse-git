@@ -1,3 +1,7 @@
+import {
+  createAdjacentNodeIds,
+  getNodesConnectedToSacredTimeline,
+} from "./graph-connectivity.ts";
 import type { MultiverseGraph } from "@/types/multiverse";
 
 export interface VariantContextInfo {
@@ -69,26 +73,6 @@ export function getVariantContexts(
   ];
 }
 
-function getNodesConnectedToSacredTimeline(graph: MultiverseGraph) {
-  const sacredNodeIds = graph.nodes
-    .filter((node) => node.data.isDefaultBranch)
-    .map((node) => node.id);
-  const adjacentNodeIds = createAdjacentNodeIds(graph);
-  const connectedNodeIds = new Set(sacredNodeIds);
-  const pendingNodeIds = [...sacredNodeIds];
-
-  for (const nodeId of pendingNodeIds) {
-    for (const neighborId of adjacentNodeIds.get(nodeId) ?? []) {
-      if (!connectedNodeIds.has(neighborId)) {
-        connectedNodeIds.add(neighborId);
-        pendingNodeIds.push(neighborId);
-      }
-    }
-  }
-
-  return connectedNodeIds;
-}
-
 function getVariantSegmentCommitCount(
   graph: MultiverseGraph,
   startingNodeId: string,
@@ -114,24 +98,4 @@ function getVariantSegmentCommitCount(
   }
 
   return segmentNodeIds.size;
-}
-
-function createAdjacentNodeIds(graph: MultiverseGraph) {
-  const adjacentNodeIds = new Map<string, string[]>(
-    graph.nodes.map((node) => [node.id, []]),
-  );
-
-  for (const edge of graph.edges) {
-    const sourceNeighbors = adjacentNodeIds.get(edge.source);
-    const targetNeighbors = adjacentNodeIds.get(edge.target);
-
-    if (!sourceNeighbors || !targetNeighbors) {
-      continue;
-    }
-
-    sourceNeighbors.push(edge.target);
-    targetNeighbors.push(edge.source);
-  }
-
-  return adjacentNodeIds;
 }

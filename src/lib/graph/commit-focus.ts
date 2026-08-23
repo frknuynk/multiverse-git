@@ -40,7 +40,24 @@ export function getCommitFocus(
     return createLineageFocus(graph, selectedCommit.id);
   }
 
-  return createVariantFocus(graph, branchName);
+  return getVariantFocus(graph, branchName);
+}
+
+export function getVariantFocus(
+  graph: MultiverseGraph,
+  branchName: string,
+): CommitFocus {
+  const branch = graph.branches.find(
+    (candidate) => candidate.name === branchName && !candidate.isDefault,
+  );
+
+  if (!branch) {
+    return createEmptyFocus();
+  }
+
+  const focus = createVariantFocus(graph, branchName);
+
+  return focus.emphasizedNodeIds.size > 0 ? focus : createEmptyFocus();
 }
 
 function createEmptyFocus(): CommitFocus {

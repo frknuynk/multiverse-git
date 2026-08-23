@@ -1,4 +1,5 @@
 import { MultiverseCanvas } from "@/components/graph/MultiverseCanvas";
+import type { SharedGraphView } from "@/lib/graph/shared-graph-view";
 import {
   fetchPublicRepositoryGraph,
 } from "@/lib/github/fetch-public-repository";
@@ -6,6 +7,7 @@ import type { GitHubRepository } from "@/lib/github/fetch-public-repository";
 import type { MultiverseGraph } from "@/types/multiverse";
 
 interface RepositoryGraphProps {
+  initialView?: SharedGraphView;
   repository: GitHubRepository | null;
   errorMessage?: string;
 }
@@ -13,13 +15,14 @@ interface RepositoryGraphProps {
 export async function RepositoryGraph({
   repository,
   errorMessage,
+  initialView,
 }: RepositoryGraphProps) {
   if (errorMessage) {
-    return <RepositoryFallback message={errorMessage} />;
+    return <RepositoryFallback initialView={initialView} message={errorMessage} />;
   }
 
   if (!repository) {
-    return <MultiverseCanvas />;
+    return <MultiverseCanvas initialView={initialView} />;
   }
 
   const graph = await loadRepositoryGraph(repository);
@@ -28,6 +31,7 @@ export async function RepositoryGraph({
     return (
       <MultiverseCanvas
         initialGraph={graph}
+        initialView={initialView}
         isSampled
         key={`${repository.owner}/${repository.name}`}
       />
@@ -35,11 +39,20 @@ export async function RepositoryGraph({
   }
 
   return (
-    <RepositoryFallback message="GitHub data could not be loaded. Showing the demo timeline instead." />
+    <RepositoryFallback
+      initialView={initialView}
+      message="GitHub data could not be loaded. Showing the demo timeline instead."
+    />
   );
 }
 
-function RepositoryFallback({ message }: { message: string }) {
+function RepositoryFallback({
+  initialView,
+  message,
+}: {
+  initialView?: SharedGraphView;
+  message: string;
+}) {
   return (
     <div className="space-y-4">
       <p
@@ -48,7 +61,7 @@ function RepositoryFallback({ message }: { message: string }) {
       >
         {message}
       </p>
-      <MultiverseCanvas />
+      <MultiverseCanvas initialView={initialView} />
     </div>
   );
 }

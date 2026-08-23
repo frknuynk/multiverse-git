@@ -1,11 +1,13 @@
 import ELK from "elkjs/lib/elk.bundled.js";
 
+import {
+  COMMIT_NODE_HEIGHT,
+  COMMIT_NODE_WIDTH,
+} from "@/lib/graph/flow-dimensions";
 import type { MultiverseGraph } from "@/types/multiverse";
 
 const elk = new ELK();
 
-const NODE_WIDTH = 180;
-const NODE_HEIGHT = 44;
 const VARIANT_DEPTH_SPACING = 12;
 const MAX_VARIANT_DEPTH_OFFSET = 3;
 
@@ -36,8 +38,8 @@ export async function layoutMultiverseGraph(
     },
     children: graph.nodes.map((node) => ({
       id: node.id,
-      width: NODE_WIDTH,
-      height: NODE_HEIGHT,
+      width: COMMIT_NODE_WIDTH,
+      height: COMMIT_NODE_HEIGHT,
     })),
     edges: graph.edges.map((edge) => ({
       id: edge.id,

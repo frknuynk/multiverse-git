@@ -4,8 +4,10 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
 } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
@@ -29,9 +31,38 @@ import {
   type TimelineFlowEdge,
 } from "@/components/graph/edges/TimelineEdge";
 import { fakeMultiverseGraph } from "@/lib/graph/fake-multiverse-graph";
+import {
+  COMMIT_NODE_HEIGHT,
+  COMMIT_NODE_WIDTH,
+} from "@/lib/graph/flow-dimensions";
 import { layoutMultiverseGraph } from "@/lib/graph/layout";
-import { getRiskLevel } from "@/lib/graph/risk";
-import { getCommitFocus } from "@/lib/graph/commit-focus";
+import { getRiskLevel, type VariantRiskFactor } from "@/lib/graph/risk";
+import { getCommitPresentation } from "@/lib/graph/semantic-zoom";
+import {
+  getSharedGraphViewUrl,
+  type SharedGraphView,
+} from "@/lib/graph/shared-graph-view";
+import { getTimelinePeek } from "@/lib/graph/timeline-peek";
+import {
+  getVariantInvestigation,
+  type VariantInvestigation as VariantInvestigationInfo,
+} from "@/lib/graph/variant-investigation";
+import {
+  getTimelineBrief,
+  type TimelineBrief,
+} from "@/lib/graph/timeline-brief";
+import { getCommitFocus, getVariantFocus } from "@/lib/graph/commit-focus";
+import {
+  getInitialTimelineWindowRange,
+  getTimelineWindowRangeForCommitIds,
+  getTimelineWindow,
+  normalizeTimelineWindowRange,
+  type TimelineWindowRange,
+} from "@/lib/graph/timeline-window";
+import {
+  getVariantNavigatorItems,
+  type VariantNavigatorItem,
+} from "@/lib/graph/variant-navigator";
 import {
   getVariantContexts,
   type VariantContextInfo,
@@ -73,12 +104,17 @@ const edgeTypes = { timeline: TimelineEdge };
 const MINI_MAP_WIDTH = 176;
 const MINI_MAP_HEIGHT = 96;
 const MINI_MAP_PADDING = 6;
-const FLOW_NODE_WIDTH = 180;
-const FLOW_NODE_HEIGHT = 44;
-// Keep the complete connected sample in frame while using the available canvas
-// area more efficiently. A lower padding improves label scanability without
-// hiding the outer Variant tips.
-const FIT_VIEW_OPTIONS = { padding: 0.08 };
+const FLOW_NODE_WIDTH = COMMIT_NODE_WIDTH;
+const FLOW_NODE_HEIGHT = COMMIT_NODE_HEIGHT;
+const EMPTY_SHARED_GRAPH_VIEW: SharedGraphView = { kind: "none" };
+// Include declared dimensions so a fit can account for every sampled node even
+// while React Flow is virtualizing off-screen elements.
+const FULL_GRAPH_FIT_VIEW_OPTIONS = {
+  includeHiddenNodes: true,
+  maxZoom: 0.9,
+  minZoom: 0.05,
+  padding: 0.1,
+};
 
 const getMiniMapNodeColor = (node: CommitFlowNode) => {
   if (node.data.isDefaultBranch) {
@@ -266,33 +302,110 @@ function formatRiskLevel(riskScore: number) {
   return "Healthy";
 }
 
-function FitGraphInView({ graph }: { graph: MultiverseGraph }) {
+interface FitGraphInViewProps {
+  graph: MultiverseGraph;
+  focusedNodeIds: string[];
+  isLayoutReady: boolean;
+  isFocused: boolean;
+  requestId: number;
+  shouldReduceMotion: boolean | null;
+}
+
+function FitGraphInView({
+  focusedNodeIds,
+  graph,
+  isLayoutReady,
+  isFocused,
+  requestId,
+  shouldReduceMotion,
+}: FitGraphInViewProps) {
   const { fitView, viewportInitialized } = useReactFlow<CommitFlowNode>();
+  const latestFocus = useRef({ focusedNodeIds, isFocused });
 
   useEffect(() => {
-    if (!viewportInitialized) {
+    latestFocus.current = { focusedNodeIds, isFocused };
+  }, [focusedNodeIds, isFocused]);
+
+  useEffect(() => {
+    if (!isLayoutReady || !viewportInitialized) {
       return;
     }
 
     const frame = requestAnimationFrame(() => {
-      void fitView(FIT_VIEW_OPTIONS);
+      const { focusedNodeIds: currentFocusedNodeIds, isFocused: isCurrentViewFocused } =
+        latestFocus.current;
+
+      if (isCurrentViewFocused && currentFocusedNodeIds.length > 0) {
+        void fitView({
+          duration: shouldReduceMotion ? 0 : 160,
+          nodes: currentFocusedNodeIds.map((id) => ({ id })),
+          padding: 0.24,
+        });
+        return;
+      }
+
+      void fitView(FULL_GRAPH_FIT_VIEW_OPTIONS);
     });
 
     return () => {
       cancelAnimationFrame(frame);
     };
-  }, [fitView, graph, viewportInitialized]);
+  }, [
+    fitView,
+    graph,
+    isLayoutReady,
+    requestId,
+    shouldReduceMotion,
+    viewportInitialized,
+  ]);
 
   return null;
 }
 
 interface MultiverseCanvasProps {
   initialGraph?: MultiverseGraph;
+  initialView?: SharedGraphView;
   isSampled?: boolean;
+}
+
+function getInitialSelectedVariantName(
+  graph: MultiverseGraph,
+  initialView: SharedGraphView,
+) {
+  if (
+    initialView.kind !== "variant" ||
+    !graph.branches.some(
+      (branch) => !branch.isDefault && branch.name === initialView.branchName,
+    )
+  ) {
+    return null;
+  }
+
+  return initialView.branchName;
+}
+
+function getInitialTimelineRange(
+  graph: MultiverseGraph,
+  initialView: SharedGraphView,
+) {
+  if (initialView.kind === "timeline") {
+    const sharedRange = getTimelineWindowRangeForCommitIds(
+      graph,
+      initialView.startCommitId,
+      initialView.endCommitId,
+    );
+
+    if (sharedRange) {
+      return sharedRange;
+    }
+  }
+
+  return getInitialTimelineWindowRange(graph);
 }
 
 export function MultiverseCanvas({
   initialGraph,
+  initialView = EMPTY_SHARED_GRAPH_VIEW,
   isSampled = false,
 }: MultiverseCanvasProps) {
   const isInitialGraphRenderable = hasRenderableGraph(initialGraph);
@@ -301,15 +414,144 @@ export function MultiverseCanvas({
     : fakeMultiverseGraph;
   const isSampledView = isSampled && isInitialGraphRenderable;
   const [graph, setGraph] = useState(sourceGraph);
+  const [isLayoutReady, setIsLayoutReady] = useState(false);
   const [selectedCommitId, setSelectedCommitId] = useState<string | null>(null);
+  const [hoveredCommitId, setHoveredCommitId] = useState<string | null>(null);
+  const [selectedVariantName, setSelectedVariantName] = useState<string | null>(
+    () => getInitialSelectedVariantName(sourceGraph, initialView),
+  );
+  const [isVariantNavigatorOpen, setIsVariantNavigatorOpen] = useState(false);
+  const [timelineRange, setTimelineRange] = useState<TimelineWindowRange>(() =>
+    getInitialTimelineRange(sourceGraph, initialView),
+  );
+  const [viewportRequestId, setViewportRequestId] = useState(0);
   const shouldReduceMotion = useReducedMotion();
 
-  const selectCommit = useCallback((commitId: string) => {
-    setSelectedCommitId((current) => (current === commitId ? current : commitId));
+  const timelineWindow = useMemo(
+    () => getTimelineWindow(graph, timelineRange),
+    [graph, timelineRange],
+  );
+  const isTimelineFocused = !timelineWindow.isFullTimeline;
+
+  const resetTimelineRange = useCallback(() => {
+    setTimelineRange({
+      endIndex: Math.max(0, timelineWindow.sacredNodeIds.length - 1),
+      startIndex: 0,
+    });
+  }, [timelineWindow.sacredNodeIds.length]);
+
+  const updateSharedGraphView = useCallback((view: SharedGraphView) => {
+    const nextUrl = getSharedGraphViewUrl(window.location.href, view);
+    const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+
+    if (nextUrl !== currentUrl) {
+      window.history.replaceState(null, "", nextUrl);
+    }
   }, []);
+
+  const selectCommit = useCallback((commitId: string) => {
+    setHoveredCommitId(null);
+    setIsVariantNavigatorOpen(false);
+    setSelectedVariantName(null);
+    setSelectedCommitId((current) => (current === commitId ? current : commitId));
+
+    if (selectedVariantName) {
+      updateSharedGraphView(EMPTY_SHARED_GRAPH_VIEW);
+    }
+  }, [selectedVariantName, updateSharedGraphView]);
+
+  const selectVariant = useCallback((branchName: string) => {
+    setHoveredCommitId(null);
+    setIsVariantNavigatorOpen(false);
+    setSelectedCommitId(null);
+    setSelectedVariantName(branchName);
+    resetTimelineRange();
+    setViewportRequestId((current) => current + 1);
+    updateSharedGraphView({ branchName, kind: "variant" });
+  }, [resetTimelineRange, updateSharedGraphView]);
+
+  const updateTimelineRange = useCallback(
+    (boundary: "startIndex" | "endIndex", nextValue: number) => {
+      const nextRange = normalizeTimelineWindowRange(
+        { ...timelineRange, [boundary]: nextValue },
+        timelineWindow.sacredNodeIds.length,
+      );
+
+      setHoveredCommitId(null);
+      setIsVariantNavigatorOpen(false);
+      setSelectedCommitId(null);
+      setSelectedVariantName(null);
+      setTimelineRange(nextRange);
+
+      const isFullTimeline =
+        nextRange.startIndex === 0 &&
+        nextRange.endIndex === timelineWindow.sacredNodeIds.length - 1;
+      const startCommitId = timelineWindow.sacredNodeIds[nextRange.startIndex];
+      const endCommitId = timelineWindow.sacredNodeIds[nextRange.endIndex];
+
+      updateSharedGraphView(
+        !startCommitId || !endCommitId || isFullTimeline
+          ? EMPTY_SHARED_GRAPH_VIEW
+          : { endCommitId, kind: "timeline", startCommitId },
+      );
+    },
+    [timelineRange, timelineWindow.sacredNodeIds, updateSharedGraphView],
+  );
+
+  const fitTimelineWindow = useCallback(() => {
+    setViewportRequestId((current) => current + 1);
+  }, []);
+
+  const resetTimelineWindow = useCallback(() => {
+    setHoveredCommitId(null);
+    resetTimelineRange();
+    setViewportRequestId((current) => current + 1);
+    updateSharedGraphView(EMPTY_SHARED_GRAPH_VIEW);
+  }, [resetTimelineRange, updateSharedGraphView]);
+
+  const resetTimeline = useCallback(() => {
+    const shouldFitFullTimeline = Boolean(
+      selectedCommitId || selectedVariantName || isTimelineFocused,
+    );
+
+    setIsVariantNavigatorOpen(false);
+    setHoveredCommitId(null);
+    setSelectedCommitId(null);
+    setSelectedVariantName(null);
+    resetTimelineRange();
+    updateSharedGraphView(EMPTY_SHARED_GRAPH_VIEW);
+
+    if (shouldFitFullTimeline) {
+      setViewportRequestId((current) => current + 1);
+    }
+  }, [
+    isTimelineFocused,
+    resetTimelineRange,
+    selectedCommitId,
+    selectedVariantName,
+    updateSharedGraphView,
+  ]);
+
+  const handlePaneClick = useCallback(
+    (event: ReactMouseEvent) => {
+      // React Flow can surface clicks from overlay content through its pane
+      // callback. Only a direct canvas click should reset the current focus.
+      if (event.target !== event.currentTarget) {
+        return;
+      }
+
+      resetTimeline();
+    },
+    [resetTimeline],
+  );
 
   const handleFlowKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (event.key === "Escape") {
+        setIsVariantNavigatorOpen(false);
+        return;
+      }
+
       if (event.key !== "Enter" && event.key !== " ") {
         return;
       }
@@ -336,11 +578,13 @@ export function MultiverseCanvas({
       .then((layout) => {
         if (!cancelled) {
           setGraph(layout);
+          setIsLayoutReady(true);
         }
       })
       .catch(() => {
         if (!cancelled) {
           setGraph(sourceGraph);
+          setIsLayoutReady(true);
         }
       });
 
@@ -357,11 +601,47 @@ export function MultiverseCanvas({
     () => graph.nodes.find((node) => node.id === selectedCommitId),
     [graph.nodes, selectedCommitId],
   );
+  const hoveredCommit = useMemo(
+    () => graph.nodes.find((node) => node.id === hoveredCommitId) ?? null,
+    [graph.nodes, hoveredCommitId],
+  );
   const commitFocus = useMemo(
     () => getCommitFocus(graph, selectedCommitId),
     [graph, selectedCommitId],
   );
-  const hasCommitFocus = commitFocus.kind !== "none";
+  const selectedVariantFocus = useMemo(
+    () => selectedVariantName ? getVariantFocus(graph, selectedVariantName) : null,
+    [graph, selectedVariantName],
+  );
+  const activeFocus = selectedVariantFocus ?? commitFocus;
+  const hasCommitFocus = activeFocus.kind !== "none";
+  const variantNavigatorItems = useMemo(
+    () => getVariantNavigatorItems(graph),
+    [graph],
+  );
+  const selectedVariant = useMemo(
+    () =>
+      selectedVariantName
+        ? variantNavigatorItems.find((item) => item.name === selectedVariantName) ?? null
+        : null,
+    [selectedVariantName, variantNavigatorItems],
+  );
+  const variantFocusNodeIds = useMemo(
+    () =>
+      selectedVariantFocus?.kind === "variant"
+        ? Array.from(selectedVariantFocus.emphasizedNodeIds)
+        : [],
+    [selectedVariantFocus],
+  );
+  const timelineFocusNodeIds = useMemo(
+    () => Array.from(timelineWindow.visibleNodeIds),
+    [timelineWindow.visibleNodeIds],
+  );
+  const focusedNodeIds = selectedVariant
+    ? variantFocusNodeIds
+    : isTimelineFocused
+      ? timelineFocusNodeIds
+      : [];
 
   const nodes = useMemo<CommitFlowNode[]>(
     () =>
@@ -372,24 +652,39 @@ export function MultiverseCanvas({
           authorName: node.data.author.name,
           headline: node.data.headline,
           isDimmed:
-            hasCommitFocus && !commitFocus.emphasizedNodeIds.has(node.id),
+            hasCommitFocus && !activeFocus.emphasizedNodeIds.has(node.id),
           isDefaultBranch: node.data.isDefaultBranch,
-          isEmphasized: commitFocus.emphasizedNodeIds.has(node.id),
+          isEmphasized: activeFocus.emphasizedNodeIds.has(node.id),
+          isMerge: node.data.isMerge,
+          isNexus: node.data.isNexus,
+          isTip: node.data.isTip,
           riskScore: node.data.riskScore,
         },
+        hidden: !timelineWindow.visibleNodeIds.has(node.id),
         position: node.position,
         selected: node.id === selectedCommitId,
-        style: { width: 180 },
+        height: FLOW_NODE_HEIGHT,
+        style: { height: FLOW_NODE_HEIGHT, width: FLOW_NODE_WIDTH },
         type: "commit",
+        width: FLOW_NODE_WIDTH,
       })),
-    [commitFocus.emphasizedNodeIds, graph.nodes, hasCommitFocus, selectedCommitId],
+    [
+      activeFocus.emphasizedNodeIds,
+      graph.nodes,
+      hasCommitFocus,
+      selectedCommitId,
+      timelineWindow.visibleNodeIds,
+    ],
   );
 
   const edges = useMemo<TimelineFlowEdge[]>(
     () =>
-      graph.edges.map((edge) => ({
+      graph.edges
+        .filter((edge) => timelineWindow.visibleEdgeIds.has(edge.id))
+        .map((edge) => ({
         data: {
-          isEmphasized: commitFocus.emphasizedEdgeIds.has(edge.id),
+          edgeType: edge.type,
+          isEmphasized: activeFocus.emphasizedEdgeIds.has(edge.id),
           isSacred: edge.type === "sacred",
         },
         id: edge.id,
@@ -397,7 +692,7 @@ export function MultiverseCanvas({
         target: edge.target,
         style: {
           ...getEdgeStyle(edge, riskScoreByNode),
-          opacity: hasCommitFocus && !commitFocus.emphasizedEdgeIds.has(edge.id)
+          opacity: hasCommitFocus && !activeFocus.emphasizedEdgeIds.has(edge.id)
             ? edge.type === "sacred"
               ? 0.55
               : 0.28
@@ -405,29 +700,45 @@ export function MultiverseCanvas({
         },
         type: "timeline",
       })),
-    [commitFocus.emphasizedEdgeIds, graph.edges, hasCommitFocus, riskScoreByNode],
+    [
+      activeFocus.emphasizedEdgeIds,
+      graph.edges,
+      hasCommitFocus,
+      riskScoreByNode,
+      timelineWindow.visibleEdgeIds,
+    ],
+  );
+  const visibleNodes = useMemo(
+    () => nodes.filter((node) => !node.hidden),
+    [nodes],
   );
   const variantContexts = useMemo(
     () => getVariantContexts(graph, selectedCommitId),
     [graph, selectedCommitId],
   );
-  const summary = useMemo(
-    () => ({
-      commits: graph.nodes.length,
-      variants: graph.branches.filter((branch) => !branch.isDefault).length,
-    }),
-    [graph.branches, graph.nodes.length],
+  const variantInvestigations = useMemo(
+    () =>
+      variantContexts.flatMap((context) => {
+        if (!context.branchName) {
+          return [];
+        }
+
+        const investigation = getVariantInvestigation(graph, context.branchName);
+        return investigation ? [investigation] : [];
+      }),
+    [graph, variantContexts],
   );
+  const timelineBrief = useMemo(() => getTimelineBrief(graph), [graph]);
 
   return (
-    <div className="flex flex-col gap-4 lg:flex-row">
+    <div className="flex flex-col gap-4 lg:items-start lg:flex-row">
       <motion.div
         animate={{ opacity: 1, y: 0 }}
-        className="min-w-0 overflow-hidden border border-[#303240] bg-[#0c0c14] lg:flex-1"
+        className="min-w-0 overflow-hidden border border-[#393646] bg-[#0c0c14] shadow-[inset_0_0_0_1px_rgba(245,166,35,0.035)] lg:flex-1"
         initial={shouldReduceMotion ? false : { opacity: 0, y: 4 }}
         style={{
           backgroundImage:
-            "radial-gradient(ellipse at 48% 42%, rgba(36, 45, 64, 0.28) 0%, rgba(12, 12, 20, 0) 62%), linear-gradient(180deg, #0c0c14 0%, #08090f 100%)",
+            "radial-gradient(ellipse 62% 46% at 50% 49%, rgba(245,166,35,0.075) 0%, rgba(245,166,35,0) 57%), radial-gradient(ellipse 42% 54% at 11% 18%, rgba(34,211,238,0.06) 0%, rgba(34,211,238,0) 64%), radial-gradient(ellipse 34% 46% at 87% 76%, rgba(167,139,250,0.055) 0%, rgba(167,139,250,0) 68%), linear-gradient(180deg, #0d0e16 0%, #08090f 100%)",
           // React Flow requires an explicit parent height. This clamp preserves
           // a usable canvas on compact viewports and the established 600px
           // desktop composition without relying on generated utility CSS.
@@ -440,8 +751,7 @@ export function MultiverseCanvas({
           colorMode="dark"
           edges={edges}
           edgeTypes={edgeTypes}
-          fitView
-          fitViewOptions={FIT_VIEW_OPTIONS}
+          minZoom={FULL_GRAPH_FIT_VIEW_OPTIONS.minZoom}
           nodes={nodes}
           nodesConnectable={false}
           nodesDraggable={false}
@@ -450,32 +760,55 @@ export function MultiverseCanvas({
             event.stopPropagation();
             selectCommit(node.id);
           }}
+          onNodeMouseEnter={(_, node) => {
+            setHoveredCommitId((current) =>
+              current === node.id ? current : node.id,
+            );
+          }}
+          onNodeMouseLeave={(_, node) => {
+            setHoveredCommitId((current) =>
+              current === node.id ? null : current,
+            );
+          }}
           onKeyDown={handleFlowKeyDown}
-          onPaneClick={() =>
-            setSelectedCommitId((current) => (current ? null : current))
-          }
+          onPaneClick={handlePaneClick}
           onlyRenderVisibleElements
         >
-          <FitGraphInView graph={graph} />
+          <FitGraphInView
+            focusedNodeIds={focusedNodeIds}
+            graph={graph}
+            isLayoutReady={isLayoutReady}
+            isFocused={Boolean(selectedVariant) || isTimelineFocused}
+            requestId={viewportRequestId}
+            shouldReduceMotion={shouldReduceMotion}
+          />
           <Panel
-            className="m-3 border border-[#3b3d4c] bg-[#10111a] px-3 py-2 text-xs text-[#f0f0f5] shadow-[inset_0_1px_0_rgba(245,166,35,0.1)]"
+            className="m-3 border border-[#514838] bg-[#10111a]/95 px-3 py-2 text-xs text-[#f0f0f5] shadow-[inset_0_1px_0_rgba(245,166,35,0.14)]"
+            onClick={(event) => event.stopPropagation()}
             position="top-left"
           >
-            <div className="flex items-center gap-3">
-              <span>
-                <strong className="font-semibold">{summary.commits}</strong> commits
-              </span>
-              <span className="h-3 border-l border-white/15" />
-              <span>
-                <strong className="font-semibold">{summary.variants}</strong> Variants
-              </span>
-            </div>
+            <TimelineBriefing brief={timelineBrief} />
             {isSampledView ? (
               <p className="mt-1 text-[11px] text-[#a0a0b0]">
-                Connected sample of recent commits and Variants
+                {isTimelineFocused
+                  ? `Focused window: ${timelineWindow.visibleNodeIds.size} of ${graph.nodes.length} sampled commits`
+                  : "Connected sample of recent commits and Variants"}
               </p>
             ) : null}
-            {commitFocus.kind === "variant" && commitFocus.branchName ? (
+            {variantNavigatorItems.length > 0 ? (
+              <VariantNavigator
+                isOpen={isVariantNavigatorOpen}
+                items={variantNavigatorItems}
+                onSelect={selectVariant}
+                onToggle={() => setIsVariantNavigatorOpen((current) => !current)}
+              />
+            ) : null}
+            {selectedVariant ? (
+              <VariantFocusSummary
+                onReset={resetTimeline}
+                variant={selectedVariant}
+              />
+            ) : commitFocus.kind === "variant" && commitFocus.branchName ? (
               <p
                 className="mt-1 max-w-80 text-[11px] text-[#c8d2df]"
                 title={`Viewing Variant: ${commitFocus.branchName}. Click canvas to reset.`}
@@ -484,7 +817,31 @@ export function MultiverseCanvas({
               </p>
             ) : null}
           </Panel>
-          <Controls aria-label="Canvas navigation" position="bottom-left" showInteractive={false} />
+          <SignalLegend />
+          <TimelinePeekPanel commit={hoveredCommit} />
+          {timelineWindow.sacredNodeIds.length > 1 ? (
+            <TimelineScrubber
+              endLabel={getTimelineNodeLabel(
+                graph,
+                timelineWindow.sacredNodeIds[timelineWindow.endIndex],
+              )}
+              maxIndex={timelineWindow.sacredNodeIds.length - 1}
+              onChange={updateTimelineRange}
+              onCommit={fitTimelineWindow}
+              onReset={resetTimelineWindow}
+              range={timelineWindow}
+              startLabel={getTimelineNodeLabel(
+                graph,
+                timelineWindow.sacredNodeIds[timelineWindow.startIndex],
+              )}
+            />
+          ) : null}
+          <Controls
+            aria-label="Canvas navigation"
+            fitViewOptions={FULL_GRAPH_FIT_VIEW_OPTIONS}
+            position="bottom-left"
+            showInteractive={false}
+          />
           <MiniMap<CommitFlowNode>
             ariaLabel="Multiverse overview"
             bgColor="#171724"
@@ -500,7 +857,7 @@ export function MultiverseCanvas({
             style={{ height: MINI_MAP_HEIGHT, width: MINI_MAP_WIDTH }}
             zoomable
           />
-          <GraphMiniMapOverlay edges={edges} nodes={nodes} />
+          <GraphMiniMapOverlay edges={edges} nodes={visibleNodes} />
         </ReactFlow>
       </motion.div>
 
@@ -509,7 +866,7 @@ export function MultiverseCanvas({
           <motion.aside
             animate={{ opacity: 1, x: 0 }}
             aria-live="polite"
-            className="w-full border border-[#3b3d4c] bg-[#10111a] p-5 text-[13px] leading-5 text-[#f0f0f5] shadow-[inset_0_1px_0_rgba(245,166,35,0.1)] lg:w-72"
+            className="w-full border border-[#3b3d4c] bg-[#10111a] p-5 text-[13px] leading-5 text-[#f0f0f5] shadow-[inset_0_1px_0_rgba(245,166,35,0.1)] lg:max-h-[68vh] lg:w-72 lg:overflow-y-auto"
             exit={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, x: 6 }}
             initial={shouldReduceMotion ? false : { opacity: 0, x: 6 }}
             transition={{ duration: shouldReduceMotion ? 0 : 0.14, ease: "easeOut" }}
@@ -548,7 +905,23 @@ export function MultiverseCanvas({
                 </dt>
                 <dd className="mt-0.5">{selectedCommit.data.riskScore}</dd>
               </div>
-              {variantContexts.length > 0 ? (
+              <CommitEventContext commit={selectedCommit} />
+              {variantInvestigations.length > 0 ? (
+                <div className="border-t border-white/10 pt-4">
+                  <dt className="text-[11px] font-medium uppercase tracking-wide text-[#a0a0b0]">
+                    Variant Investigation
+                  </dt>
+                  <dd className="mt-2 space-y-3">
+                    {variantInvestigations.map((investigation) => (
+                      <VariantInvestigation
+                        investigation={investigation}
+                        key={investigation.branchName}
+                        selectedCommitId={selectedCommit.id}
+                      />
+                    ))}
+                  </dd>
+                </div>
+              ) : variantContexts.length > 0 ? (
                 <div className="border-t border-white/10 pt-4">
                   <dt className="text-[11px] font-medium uppercase tracking-wide text-[#a0a0b0]">
                     Variant Context
@@ -567,6 +940,325 @@ export function MultiverseCanvas({
           </motion.aside>
         ) : null}
       </AnimatePresence>
+    </div>
+  );
+}
+
+interface TimelineScrubberProps {
+  endLabel: string;
+  maxIndex: number;
+  onChange: (boundary: "startIndex" | "endIndex", nextValue: number) => void;
+  onCommit: () => void;
+  onReset: () => void;
+  range: TimelineWindowRange & {
+    isFullTimeline: boolean;
+    visibleNodeIds: Set<string>;
+  };
+  startLabel: string;
+}
+
+function TimelineScrubber({
+  endLabel,
+  maxIndex,
+  onChange,
+  onCommit,
+  onReset,
+  range,
+  startLabel,
+}: TimelineScrubberProps) {
+  const handleKeyUp = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (
+      ["ArrowDown", "ArrowLeft", "ArrowRight", "ArrowUp", "End", "Home", "PageDown", "PageUp"].includes(
+        event.key,
+      )
+    ) {
+      onCommit();
+    }
+  };
+
+  return (
+    <Panel
+      className="m-3 w-80 border border-[#3b3d4c] bg-[#10111a] px-3 py-2 text-[#f0f0f5] shadow-[inset_0_1px_0_rgba(245,166,35,0.1)]"
+      onClick={(event) => event.stopPropagation()}
+      position="bottom-center"
+    >
+      <section aria-labelledby="sacred-timeline-range-title">
+        <div className="flex items-baseline justify-between gap-3">
+          <h2
+            className="text-[11px] font-semibold uppercase tracking-wide text-[#d7bd83]"
+            id="sacred-timeline-range-title"
+          >
+            Sacred Timeline range
+          </h2>
+          <output className="shrink-0 text-[11px] text-[#aeb6c4]">
+            {range.visibleNodeIds.size} commits in view
+          </output>
+        </div>
+        <p className="mt-1 truncate text-[11px] text-[#aeb6c4]" title={`${startLabel} to ${endLabel}`}>
+          {startLabel} → {endLabel}
+        </p>
+        <div className="mt-2 grid gap-1.5">
+          <label className="text-[11px] text-[#c8d2df]" htmlFor="sacred-timeline-start">
+            Start commit
+          </label>
+          <input
+            aria-valuetext={startLabel}
+            className="h-1.5 w-full accent-[#f5a623]"
+            id="sacred-timeline-start"
+            max={maxIndex}
+            min={0}
+            onBlur={onCommit}
+            onChange={(event) => onChange("startIndex", Number(event.currentTarget.value))}
+            onKeyUp={handleKeyUp}
+            onPointerUp={onCommit}
+            step={1}
+            type="range"
+            value={range.startIndex}
+          />
+          <label className="text-[11px] text-[#c8d2df]" htmlFor="sacred-timeline-end">
+            End commit
+          </label>
+          <input
+            aria-valuetext={endLabel}
+            className="h-1.5 w-full accent-[#f5a623]"
+            id="sacred-timeline-end"
+            max={maxIndex}
+            min={0}
+            onBlur={onCommit}
+            onChange={(event) => onChange("endIndex", Number(event.currentTarget.value))}
+            onKeyUp={handleKeyUp}
+            onPointerUp={onCommit}
+            step={1}
+            type="range"
+            value={range.endIndex}
+          />
+        </div>
+        {!range.isFullTimeline ? (
+          <button
+            className="mt-2 border border-white/20 px-2 py-1 text-[11px] font-medium text-[#f0f0f5] transition-colors hover:border-[#f5a623]/75 hover:text-[#fff8eb] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#f5a623]"
+            onClick={onReset}
+            type="button"
+          >
+            Show full sample
+          </button>
+        ) : null}
+      </section>
+    </Panel>
+  );
+}
+
+function getTimelineNodeLabel(graph: MultiverseGraph, nodeId: string | undefined) {
+  const node = graph.nodes.find((candidate) => candidate.id === nodeId);
+
+  if (!node) {
+    return "Commit unavailable";
+  }
+
+  return `${formatCommitDate(node.data.committedDate)} · ${node.data.headline}`;
+}
+
+function SignalLegend() {
+  const presentation = useStore((state) =>
+    getCommitPresentation(state.transform[2]),
+  );
+
+  return (
+    <Panel
+      className="m-3 hidden border border-[#3b3d4c] bg-[#10111a]/95 px-3 py-2 text-[10px] text-[#c8d2df] shadow-[inset_0_1px_0_rgba(34,211,238,0.08)] md:block"
+      position="top-right"
+    >
+      <p className="font-semibold uppercase tracking-[0.12em] text-[#aeb6c4]">
+        Timeline signals
+      </p>
+      <ul
+        aria-label="Timeline signal legend"
+        className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-1"
+      >
+        <SignalLegendItem colorClass="bg-[#f5a623]" label="Sacred" />
+        <SignalLegendItem colorClass="bg-cyan-400" label="Variant" />
+        <SignalLegendItem colorClass="bg-violet-400" label="Caution" />
+        <SignalLegendItem colorClass="bg-red-500" label="Incursion" />
+      </ul>
+      {presentation === "overview" ? (
+        <p className="mt-2 border-t border-white/10 pt-1.5 text-[10px] text-[#aeb6c4]">
+          Overview mode · Zoom in to inspect commits
+        </p>
+      ) : null}
+    </Panel>
+  );
+}
+
+function TimelinePeekPanel({
+  commit,
+}: {
+  commit: MultiverseGraph["nodes"][number] | null;
+}) {
+  const presentation = useStore((state) =>
+    getCommitPresentation(state.transform[2]),
+  );
+
+  if (!commit || presentation !== "overview") {
+    return null;
+  }
+
+  const peek = getTimelinePeek(commit);
+  const signal = peek.isDefaultBranch
+    ? "Sacred Timeline"
+    : peek.eventLabel ?? "Variant";
+  const accentClass = peek.isDefaultBranch
+    ? "border-[#f5a623]/70 text-[#f8cd72]"
+    : peek.riskLevel === "high"
+      ? "border-red-400/70 text-red-300"
+      : peek.riskLevel === "medium"
+        ? "border-violet-400/70 text-violet-200"
+        : "border-cyan-400/70 text-cyan-100";
+  const showRisk = !peek.isDefaultBranch && peek.riskLevel !== "healthy";
+
+  return (
+    <Panel
+      aria-label="Commit preview"
+      className="pointer-events-none m-3 max-w-80 border border-[#3b3d4c] bg-[#10111a]/95 px-3 py-2 text-[#f0f0f5] shadow-[inset_0_1px_0_rgba(34,211,238,0.08)]"
+      position="top-center"
+    >
+      <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.1em]">
+        <span className={`border-l-2 pl-1.5 ${accentClass}`}>{signal}</span>
+        {showRisk ? (
+          <span className={peek.riskLevel === "high" ? "text-red-300" : "text-violet-200"}>
+            Risk {peek.riskScore}
+          </span>
+        ) : null}
+      </div>
+      <p className="mt-1 truncate text-sm font-semibold leading-4" title={peek.headline}>
+        {peek.headline}
+      </p>
+      <p className="mt-1 truncate text-[11px] text-[#aeb6c4]" title={peek.authorName}>
+        {peek.authorName} · Click to inspect
+      </p>
+    </Panel>
+  );
+}
+
+function SignalLegendItem({
+  colorClass,
+  label,
+}: {
+  colorClass: string;
+  label: string;
+}) {
+  return (
+    <li className="flex items-center gap-1.5 whitespace-nowrap">
+      <span aria-hidden="true" className={`h-1.5 w-3 ${colorClass}`} />
+      <span>{label}</span>
+    </li>
+  );
+}
+
+function TimelineBriefing({ brief }: { brief: TimelineBrief }) {
+  const status = getTimelineStatusPresentation(brief);
+
+  return (
+    <section aria-label="Timeline briefing">
+      <div className="flex items-center gap-3">
+        <span>
+          <strong className="font-semibold">{brief.commitCount}</strong> commits
+        </span>
+        <span className="h-3 border-l border-white/15" />
+        <span>
+          <strong className="font-semibold">{brief.variantCount}</strong> Variants
+        </span>
+      </div>
+      <p className={`mt-1 flex items-center gap-1.5 text-[11px] ${status.textClass}`}>
+        <span aria-hidden="true" className={`h-1.5 w-1.5 ${status.dotClass}`} />
+        {status.label}
+      </p>
+      <dl className="mt-2 grid grid-cols-3 gap-2 border-t border-white/10 pt-2 text-[10px]">
+        <TimelineMetric label="Nexus" value={brief.nexusEventCount} />
+        <TimelineMetric label="Convergence" value={brief.convergenceCount} />
+        <TimelineMetric
+          label="Incursion"
+          value={brief.incursionVariantCount}
+        />
+      </dl>
+    </section>
+  );
+}
+
+function TimelineMetric({ label, value }: { label: string; value: number }) {
+  return (
+    <div>
+      <dt className="uppercase tracking-wide text-[#7f8796]">{label}</dt>
+      <dd className="mt-0.5 font-mono text-xs font-semibold text-[#f0f0f5]">{value}</dd>
+    </div>
+  );
+}
+
+function getTimelineStatusPresentation(brief: TimelineBrief) {
+  if (brief.status === "incursion") {
+    return {
+      dotClass: "bg-red-500",
+      label: `${brief.incursionVariantCount} Unstable Variant${brief.incursionVariantCount === 1 ? "" : "s"} detected`,
+      textClass: "text-red-300",
+    };
+  }
+
+  if (brief.status === "monitoring") {
+    return {
+      dotClass: "bg-violet-400",
+      label: `${brief.cautionVariantCount} Variant${brief.cautionVariantCount === 1 ? "" : "s"} under observation`,
+      textClass: "text-violet-200",
+    };
+  }
+
+  return {
+    dotClass: "bg-cyan-400",
+    label: "Temporal field stable",
+    textClass: "text-cyan-100",
+  };
+}
+
+function CommitEventContext({
+  commit,
+}: {
+  commit: MultiverseGraph["nodes"][number];
+}) {
+  const signals = [
+    commit.data.isNexus
+      ? {
+          label: "Nexus Event",
+          text: "This sampled commit begins a Variant from the Sacred Timeline.",
+        }
+      : null,
+    commit.data.isMerge
+      ? {
+          label: "Convergence",
+          text: "This merge commit joins multiple sampled histories.",
+        }
+      : null,
+    commit.data.isTip
+      ? {
+          label: "Active tip",
+          text: "This is a current branch tip in the sampled graph.",
+        }
+      : null,
+  ].filter((signal): signal is { label: string; text: string } => Boolean(signal));
+
+  if (signals.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="border-t border-white/10 pt-4">
+      <dt className="text-[11px] font-medium uppercase tracking-wide text-[#a0a0b0]">
+        Timeline Event
+      </dt>
+      <dd className="mt-2 space-y-2">
+        {signals.map((signal) => (
+          <div className="border-l-2 border-[#f5a623] pl-3" key={signal.label}>
+            <p className="text-xs font-medium text-[#f4d18b]">{signal.label}</p>
+            <p className="mt-0.5 text-xs text-[#aeb6c4]">{signal.text}</p>
+          </div>
+        ))}
+      </dd>
     </div>
   );
 }
@@ -593,4 +1285,192 @@ function VariantContext({ context }: { context: VariantContextInfo }) {
       </p>
     </div>
   );
+}
+
+function VariantInvestigation({
+  investigation,
+  selectedCommitId,
+}: {
+  investigation: VariantInvestigationInfo;
+  selectedCommitId: string;
+}) {
+  const riskFactors = investigation.riskFactors;
+
+  return (
+    <div className="border-l-2 border-violet-400 pl-3">
+      <p
+        className="truncate text-xs font-medium text-[#f0f0f5]"
+        title={investigation.branchName}
+      >
+        {investigation.branchName}
+      </p>
+      <p className="mt-0.5 text-xs text-[#aeb6c4]">
+        {investigation.commitsShown} commits shown · {investigation.connectsToSacredTimeline
+          ? "Connected to Sacred Timeline"
+          : "Not connected to Sacred Timeline"}
+      </p>
+      <p className="mt-1 text-xs font-medium text-[#f0f0f5]">
+        Risk {investigation.riskScore} · {formatRiskLevel(investigation.riskScore)}
+      </p>
+      <div className="mt-2 space-y-1.5 text-xs text-[#aeb6c4]">
+        {investigation.nexusEvent && investigation.nexusEvent.id !== selectedCommitId ? (
+          <InvestigationFact
+            label="Nexus Event"
+            value={investigation.nexusEvent.headline}
+          />
+        ) : null}
+        {investigation.convergence && investigation.convergence.id !== selectedCommitId ? (
+          <InvestigationFact
+            label="Convergence"
+            value={investigation.convergence.headline}
+          />
+        ) : null}
+      </div>
+      <ul className="mt-2 space-y-1.5 text-xs text-[#aeb6c4]">
+        {riskFactors.map((factor) => (
+          <li className="flex gap-1.5" key={factor.kind}>
+            <span aria-hidden="true" className="mt-1.5 h-1 w-1 shrink-0 bg-violet-400" />
+            <span>{formatRiskFactor(factor, investigation)}</span>
+          </li>
+        ))}
+        {riskFactors.length === 0 ? (
+          <li>
+            No elevated risk signals in this visible sample.
+          </li>
+        ) : null}
+      </ul>
+      {!investigation.scoreMatchesCurrentGraph ? (
+        <p className="mt-2 text-[11px] leading-4 text-[#7f8796]">
+          Signals are reconstructed from the current sample; the source score was
+          calculated when this sample was built.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function InvestigationFact({ label, value }: { label: string; value: string }) {
+  return (
+    <p>
+      <span className="text-[#7f8796]">{label}: </span>
+      <span className="text-[#c8d2df]">{value}</span>
+    </p>
+  );
+}
+
+function formatRiskFactor(
+  factor: VariantRiskFactor,
+  investigation: VariantInvestigationInfo,
+) {
+  switch (factor.kind) {
+    case "divergence":
+      return `${investigation.commitsAhead} commits in the sampled first-parent path`;
+    case "staleness":
+      return `Last sampled tip is ${investigation.tipAgeInDays ?? "an unknown number of"} days old`;
+    case "incomplete-history":
+      return "Sacred Timeline base was not reached in the first-parent sample";
+    case "author-spread":
+      return `${investigation.contributorsShown} contributors appear in this Variant sample`;
+    case "merge-tip":
+      return "Active Variant tip is a merge commit";
+    case "unstable-variant":
+      return "Bounded history cap reached with a long-idle Variant tip";
+  }
+}
+
+interface VariantNavigatorProps {
+  isOpen: boolean;
+  items: VariantNavigatorItem[];
+  onSelect: (branchName: string) => void;
+  onToggle: () => void;
+}
+
+function VariantNavigator({
+  isOpen,
+  items,
+  onSelect,
+  onToggle,
+}: VariantNavigatorProps) {
+  return (
+    <div className="relative mt-2">
+      <button
+        aria-controls="variant-navigator-menu"
+        aria-expanded={isOpen}
+        className="border border-cyan-400/45 px-2 py-1 text-[11px] font-medium text-[#d9f8ff] transition-colors hover:border-cyan-300 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+        onClick={onToggle}
+        type="button"
+      >
+        Explore Variants <span className="text-cyan-300">{items.length}</span>
+      </button>
+      {isOpen ? (
+        <div
+          className="absolute left-0 top-full z-20 mt-1 max-h-52 w-64 overflow-y-auto border border-[#3b3d4c] bg-[#10111a] p-1 shadow-[inset_0_1px_0_rgba(245,166,35,0.1)] sm:left-full sm:top-0 sm:mt-0 sm:ml-2"
+          id="variant-navigator-menu"
+          role="menu"
+        >
+          {items.map((item) => (
+            <button
+              className="block w-full border border-transparent px-2 py-2 text-left transition-colors hover:border-cyan-400/50 hover:bg-[#151a24] focus-visible:border-cyan-300 focus-visible:outline-none"
+              key={item.name}
+              onClick={() => onSelect(item.name)}
+              role="menuitem"
+              type="button"
+            >
+              <span className="block truncate text-xs font-medium text-[#f0f0f5]" title={item.name}>
+                {item.name}
+              </span>
+              <span className="mt-0.5 block text-[11px] text-[#aeb6c4]">
+                <span className={getRiskTextClass(item.riskScore)}>
+                  {formatRiskLevel(item.riskScore)} · Risk {item.riskScore}
+                </span>
+                <span> · {item.commitsShown} commits</span>
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function VariantFocusSummary({
+  onReset,
+  variant,
+}: {
+  onReset: () => void;
+  variant: VariantNavigatorItem;
+}) {
+  return (
+    <div className="mt-2 border-t border-white/10 pt-2 text-[11px] text-[#c8d2df]">
+      <p className="truncate font-medium text-[#f0f0f5]" title={variant.name}>
+        Viewing Variant: {variant.name}
+      </p>
+      <p className="mt-0.5">
+        {variant.commitsShown} commits shown · {variant.connectsToSacredTimeline
+          ? "Connected to Sacred Timeline"
+          : "Not connected to Sacred Timeline"} · {formatRiskLevel(variant.riskScore)}
+      </p>
+      <button
+        className="mt-2 border border-white/20 px-2 py-1 text-[11px] font-medium text-[#f0f0f5] transition-colors hover:border-[#f5a623]/75 hover:text-[#fff8eb] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#f5a623]"
+        onClick={onReset}
+        type="button"
+      >
+        Return to full timeline
+      </button>
+    </div>
+  );
+}
+
+function getRiskTextClass(riskScore: number) {
+  const riskLevel = getRiskLevel(riskScore);
+
+  if (riskLevel === "high") {
+    return "text-red-400";
+  }
+
+  if (riskLevel === "medium") {
+    return "text-violet-300";
+  }
+
+  return "text-cyan-300";
 }

@@ -6,8 +6,13 @@ import type {
   MultiverseGraph,
   MultiverseNode,
 } from "@/types/multiverse";
-import { HIGH_RISK_THRESHOLD } from "@/lib/graph/risk";
+import { assessVariantRisk, HIGH_RISK_THRESHOLD } from "@/lib/graph/risk";
+import { parseGitHubRepository } from "@/lib/github/parse-github-repository";
 import { selectVariantRefs } from "@/lib/github/select-recent-variant-refs";
+import type { GitHubRepository } from "@/lib/github/parse-github-repository";
+
+export { parseGitHubRepository } from "@/lib/github/parse-github-repository";
+export type { GitHubRepository } from "@/lib/github/parse-github-repository";
 
 const COMMIT_LIMIT = 40;
 const BRANCH_LIMIT = 12;
@@ -17,9 +22,6 @@ const VARIANT_CONNECTION_PRIORITY_LIMIT = 4;
 const VARIANT_WALK_COMMIT_CAP = 22;
 const VARIANT_WALK_BATCH_DEPTH = 5;
 const GLOBAL_COMMIT_LIMIT = 150;
-const STALE_VARIANT_AGE_DAYS = 45;
-const UNSTABLE_VARIANT_AGE_DAYS = 120;
-const UNSTABLE_VARIANT_RISK = 35;
 
 const commitFields = `
   oid
@@ -127,23 +129,6 @@ interface GitHubPullRequest {
 
 interface GitHubVariantWalkResponse {
   repository: Record<string, GitHubCommit | null> | null;
-}
-
-export interface GitHubRepository {
-  owner: string;
-  name: string;
-}
-
-export function parseGitHubRepository(
-  value: string | undefined,
-): GitHubRepository | null {
-  const [owner, name, ...extraSegments] = value?.trim().split("/") ?? [];
-
-  if (!owner || !name || extraSegments.length > 0) {
-    return null;
-  }
-
-  return { owner, name };
 }
 
 export function getConfiguredRepository(): GitHubRepository | null {
@@ -710,41 +695,19 @@ function calculateBranchRisk(
   variantPath: VariantPath,
   commitsByOid: Map<string, GitHubCommit>,
 ): number {
-  const ageInDays = Math.max(
-    0,
-    Math.floor((Date.now() - Date.parse(tip.committedDate)) / 86_400_000),
-  );
-  const divergenceRisk = Math.min(
-    24,
-    Math.max(0, variantPath.oids.size - 3) * 3,
-  );
-  const stalenessRisk = Math.min(
-    24,
-    Math.floor(Math.max(0, ageInDays - STALE_VARIANT_AGE_DAYS) / 21) * 4,
-  );
-  const incompleteHistoryRisk = variantPath.hasSacredBase ? 0 : 6;
   const authorCount = new Set(
     Array.from(variantPath.oids, (oid) =>
       commitsByOid.get(oid)?.author?.email.trim(),
     ).filter((email): email is string => Boolean(email)),
   ).size;
-  const authorRisk = Math.min(6, Math.max(0, authorCount - 2) * 3);
-  const mergeRisk = tip.parents.nodes.length > 1 ? 2 : 0;
-  const unstableVariantRisk =
-    variantPath.oids.size === VARIANT_WALK_COMMIT_CAP &&
-    ageInDays >= UNSTABLE_VARIANT_AGE_DAYS
-      ? UNSTABLE_VARIANT_RISK
-      : 0;
 
-  return Math.min(
-    100,
-    divergenceRisk +
-      stalenessRisk +
-      incompleteHistoryRisk +
-      authorRisk +
-      mergeRisk +
-      unstableVariantRisk,
-  );
+  return assessVariantRisk({
+    authorCount,
+    commitsShown: variantPath.oids.size,
+    hasSacredBase: variantPath.hasSacredBase,
+    tipCommittedDate: tip.committedDate,
+    tipIsMerge: tip.parents.nodes.length > 1,
+  }).score;
 }
 
 interface VariantPath {
