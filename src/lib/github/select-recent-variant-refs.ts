@@ -9,6 +9,7 @@ export function selectVariantRefs<T extends VariantRefCandidate>(
   defaultBranchName: string,
   limit: number,
 ): T[] {
+  if (limit <= 0) return [];
   const selectedRefs: T[] = [];
   const selectedTipOids = new Set<string>();
 

@@ -1,5 +1,5 @@
 export const MEDIUM_RISK_THRESHOLD = 30;
-export const HIGH_RISK_THRESHOLD = 75;
+export const HIGH_RISK_THRESHOLD = 60;
 
 const STALE_VARIANT_AGE_DAYS = 45;
 const UNSTABLE_VARIANT_AGE_DAYS = 120;
@@ -75,7 +75,7 @@ export function assessVariantRisk(
   );
   const mergeRisk = input.tipIsMerge ? 2 : 0;
   const unstableVariantRisk =
-    input.commitsShown === UNSTABLE_VARIANT_COMMIT_COUNT &&
+    input.commitsShown >= UNSTABLE_VARIANT_COMMIT_COUNT &&
     ageInDays >= UNSTABLE_VARIANT_AGE_DAYS
       ? UNSTABLE_VARIANT_RISK
       : 0;

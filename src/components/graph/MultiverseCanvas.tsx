@@ -8,6 +8,7 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
+  type ReactNode,
 } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
@@ -30,12 +31,11 @@ import {
   TimelineEdge,
   type TimelineFlowEdge,
 } from "@/components/graph/edges/TimelineEdge";
-import { fakeMultiverseGraph } from "@/lib/graph/fake-multiverse-graph";
 import {
   COMMIT_NODE_HEIGHT,
   COMMIT_NODE_WIDTH,
 } from "@/lib/graph/flow-dimensions";
-import { layoutMultiverseGraph } from "@/lib/graph/layout";
+import { GraphToolbar } from "@/components/graph/GraphToolbar";
 import { getRiskLevel, type VariantRiskFactor } from "@/lib/graph/risk";
 import { getCommitPresentation } from "@/lib/graph/semantic-zoom";
 import {
@@ -176,7 +176,7 @@ function GraphMiniMapOverlay({ nodes, edges }: GraphMiniMapOverlayProps) {
 
   return (
     <Panel
-      className="pointer-events-none"
+      className="pointer-events-none hidden sm:block"
       position="bottom-right"
       style={{
         height: MINI_MAP_HEIGHT,
@@ -270,18 +270,6 @@ function getMiniMapBounds(nodes: CommitFlowNode[]) {
   };
 }
 
-function hasRenderableGraph(
-  graph: MultiverseGraph | undefined,
-): graph is MultiverseGraph {
-  return Boolean(
-    graph &&
-      Array.isArray(graph.nodes) &&
-      graph.nodes.length > 0 &&
-      Array.isArray(graph.edges) &&
-      Array.isArray(graph.branches),
-  );
-}
-
 function formatCommitDate(committedDate: string) {
   const date = new Date(committedDate);
 
@@ -363,7 +351,8 @@ function FitGraphInView({
 }
 
 interface MultiverseCanvasProps {
-  initialGraph?: MultiverseGraph;
+  initialGraph: MultiverseGraph;
+  repositoryLabel: string;
   initialView?: SharedGraphView;
   isSampled?: boolean;
 }
@@ -404,25 +393,20 @@ function getInitialTimelineRange(
 }
 
 export function MultiverseCanvas({
-  initialGraph,
+  initialGraph: graph,
+  repositoryLabel,
   initialView = EMPTY_SHARED_GRAPH_VIEW,
   isSampled = false,
 }: MultiverseCanvasProps) {
-  const isInitialGraphRenderable = hasRenderableGraph(initialGraph);
-  const sourceGraph = isInitialGraphRenderable
-    ? initialGraph
-    : fakeMultiverseGraph;
-  const isSampledView = isSampled && isInitialGraphRenderable;
-  const [graph, setGraph] = useState(sourceGraph);
-  const [isLayoutReady, setIsLayoutReady] = useState(false);
+  const isSampledView = isSampled;
   const [selectedCommitId, setSelectedCommitId] = useState<string | null>(null);
   const [hoveredCommitId, setHoveredCommitId] = useState<string | null>(null);
   const [selectedVariantName, setSelectedVariantName] = useState<string | null>(
-    () => getInitialSelectedVariantName(sourceGraph, initialView),
+    () => getInitialSelectedVariantName(graph, initialView),
   );
   const [isVariantNavigatorOpen, setIsVariantNavigatorOpen] = useState(false);
   const [timelineRange, setTimelineRange] = useState<TimelineWindowRange>(() =>
-    getInitialTimelineRange(sourceGraph, initialView),
+    getInitialTimelineRange(graph, initialView),
   );
   const [viewportRequestId, setViewportRequestId] = useState(0);
   const shouldReduceMotion = useReducedMotion();
@@ -571,28 +555,6 @@ export function MultiverseCanvas({
     [selectCommit],
   );
 
-  useEffect(() => {
-    let cancelled = false;
-
-    void layoutMultiverseGraph(sourceGraph)
-      .then((layout) => {
-        if (!cancelled) {
-          setGraph(layout);
-          setIsLayoutReady(true);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setGraph(sourceGraph);
-          setIsLayoutReady(true);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [sourceGraph]);
-
   const riskScoreByNode = useMemo(
     () => new Map(graph.nodes.map((node) => [node.id, node.data.riskScore])),
     [graph.nodes],
@@ -731,7 +693,9 @@ export function MultiverseCanvas({
   const timelineBrief = useMemo(() => getTimelineBrief(graph), [graph]);
 
   return (
-    <div className="flex flex-col gap-4 lg:items-start lg:flex-row">
+    <div className="space-y-2 sm:space-y-3">
+      <GraphToolbar graph={graph} repositoryLabel={repositoryLabel} onSelect={(id) => { selectCommit(id); resetTimelineRange(); setViewportRequestId((value) => value + 1); }} />
+    <div className="flex flex-col gap-2 sm:gap-4 lg:items-start lg:flex-row">
       <motion.div
         animate={{ opacity: 1, y: 0 }}
         className="min-w-0 overflow-hidden border border-[#393646] bg-[#0c0c14] shadow-[inset_0_0_0_1px_rgba(245,166,35,0.035)] lg:flex-1"
@@ -739,10 +703,9 @@ export function MultiverseCanvas({
         style={{
           backgroundImage:
             "radial-gradient(ellipse 62% 46% at 50% 49%, rgba(245,166,35,0.075) 0%, rgba(245,166,35,0) 57%), radial-gradient(ellipse 42% 54% at 11% 18%, rgba(34,211,238,0.06) 0%, rgba(34,211,238,0) 64%), radial-gradient(ellipse 34% 46% at 87% 76%, rgba(167,139,250,0.055) 0%, rgba(167,139,250,0) 68%), linear-gradient(180deg, #0d0e16 0%, #08090f 100%)",
-          // React Flow requires an explicit parent height. This clamp preserves
-          // a usable canvas on compact viewports and the established 600px
-          // desktop composition without relying on generated utility CSS.
-          height: "clamp(26rem, 68vh, 37.5rem)",
+          // React Flow requires an explicit parent height. Keep the phone canvas
+          // tall enough for touch exploration before secondary panels appear.
+          height: "clamp(30rem, calc(100svh - 15rem), 42rem)",
         }}
         transition={{ duration: shouldReduceMotion ? 0 : 0.18, ease: "easeOut" }}
       >
@@ -777,13 +740,13 @@ export function MultiverseCanvas({
           <FitGraphInView
             focusedNodeIds={focusedNodeIds}
             graph={graph}
-            isLayoutReady={isLayoutReady}
+            isLayoutReady
             isFocused={Boolean(selectedVariant) || isTimelineFocused}
             requestId={viewportRequestId}
             shouldReduceMotion={shouldReduceMotion}
           />
           <Panel
-            className="m-3 border border-[#514838] bg-[#10111a]/95 px-3 py-2 text-xs text-[#f0f0f5] shadow-[inset_0_1px_0_rgba(245,166,35,0.14)]"
+            className="m-2 max-w-[calc(100%-1rem)] border border-[#514838] bg-[#10111a]/95 px-2.5 py-2 text-xs text-[#f0f0f5] shadow-[inset_0_1px_0_rgba(245,166,35,0.14)] sm:m-3 sm:px-3"
             onClick={(event) => event.stopPropagation()}
             position="top-left"
           >
@@ -792,7 +755,7 @@ export function MultiverseCanvas({
               <p className="mt-1 text-[11px] text-[#a0a0b0]">
                 {isTimelineFocused
                   ? `Focused window: ${timelineWindow.visibleNodeIds.size} of ${graph.nodes.length} sampled commits`
-                  : "Connected sample of recent commits and Variants"}
+                  : "Bounded sample · missing ancestry is not shown"}
               </p>
             ) : null}
             {variantNavigatorItems.length > 0 ? (
@@ -845,6 +808,7 @@ export function MultiverseCanvas({
           <MiniMap<CommitFlowNode>
             ariaLabel="Multiverse overview"
             bgColor="#171724"
+            className="hidden sm:block"
             maskColor="rgba(5, 5, 10, 0.35)"
             maskStrokeColor="#f0f0f5"
             maskStrokeWidth={0.75}
@@ -860,20 +824,48 @@ export function MultiverseCanvas({
           <GraphMiniMapOverlay edges={edges} nodes={visibleNodes} />
         </ReactFlow>
       </motion.div>
+      {timelineWindow.sacredNodeIds.length > 1 ? (
+        <MobileTimelineControls>
+          <TimelineRangeControlContent
+            endLabel={getTimelineNodeLabel(
+              graph,
+              timelineWindow.sacredNodeIds[timelineWindow.endIndex],
+            )}
+            maxIndex={timelineWindow.sacredNodeIds.length - 1}
+            onChange={updateTimelineRange}
+            onCommit={fitTimelineWindow}
+            onReset={resetTimelineWindow}
+            range={timelineWindow}
+            startLabel={getTimelineNodeLabel(
+              graph,
+              timelineWindow.sacredNodeIds[timelineWindow.startIndex],
+            )}
+          />
+        </MobileTimelineControls>
+      ) : null}
 
       <AnimatePresence initial={false}>
         {selectedCommit ? (
           <motion.aside
             animate={{ opacity: 1, x: 0 }}
             aria-live="polite"
-            className="w-full border border-[#3b3d4c] bg-[#10111a] p-5 text-[13px] leading-5 text-[#f0f0f5] shadow-[inset_0_1px_0_rgba(245,166,35,0.1)] lg:max-h-[68vh] lg:w-72 lg:overflow-y-auto"
+            className="fixed inset-x-0 bottom-0 z-40 max-h-[72svh] w-full overflow-y-auto border-t border-[#3b3d4c] bg-[#10111a] p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] text-[13px] leading-5 text-[#f0f0f5] shadow-[0_-18px_40px_rgba(0,0,0,0.45),inset_0_1px_0_rgba(245,166,35,0.1)] lg:static lg:max-h-[68vh] lg:w-72 lg:overflow-y-auto lg:border lg:p-5 lg:shadow-[inset_0_1px_0_rgba(245,166,35,0.1)]"
             exit={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, x: 6 }}
             initial={shouldReduceMotion ? false : { opacity: 0, x: 6 }}
             transition={{ duration: shouldReduceMotion ? 0 : 0.14, ease: "easeOut" }}
           >
-            <h2 className="text-sm font-semibold leading-5">
+            <div className="sticky top-0 z-10 -mx-4 mb-3 flex items-center justify-between gap-3 border-b border-white/10 bg-[#10111a] px-4 pb-3 lg:static lg:mx-0 lg:block lg:border-0 lg:bg-transparent lg:p-0">
+              <p className="text-xs font-semibold uppercase tracking-wide text-[#aeb6c4] lg:hidden">
+                Commit details
+              </p>
+              <button type="button" className="min-h-10 border border-cyan-400/40 px-3 text-xs text-cyan-200 lg:mb-3 lg:min-h-9 lg:border-0 lg:px-0 lg:text-cyan-300 lg:underline" onClick={() => setSelectedCommitId(null)}>Close</button>
+            </div>
+            <h2 className="break-words text-sm font-semibold leading-5">
               {selectedCommit.data.headline}
             </h2>
+            <p className="mt-2 break-all font-mono text-xs text-[#a0a0b0]">{selectedCommit.id}</p>
+            <a className="mt-2 inline-block text-cyan-300 underline" href={selectedCommit.data.url} target="_blank" rel="noopener noreferrer">View commit on GitHub ↗</a>
+            <p className="mt-3 whitespace-pre-wrap break-words text-xs text-[#c8d2df]">{selectedCommit.data.message}</p>
             <dl className="mt-5 space-y-4">
               <div>
                 <dt className="text-[11px] font-medium uppercase tracking-wide text-[#a0a0b0]">
@@ -941,6 +933,7 @@ export function MultiverseCanvas({
         ) : null}
       </AnimatePresence>
     </div>
+    </div>
   );
 }
 
@@ -966,6 +959,56 @@ function TimelineScrubber({
   range,
   startLabel,
 }: TimelineScrubberProps) {
+  return (
+    <Panel
+      className="m-3 hidden w-80 border border-[#3b3d4c] bg-[#10111a] px-3 py-2 text-[#f0f0f5] shadow-[inset_0_1px_0_rgba(245,166,35,0.1)] sm:block"
+      onClick={(event) => event.stopPropagation()}
+      position="bottom-center"
+    >
+      <TimelineRangeControlContent
+        endLabel={endLabel}
+        maxIndex={maxIndex}
+        onChange={onChange}
+        onCommit={onCommit}
+        onReset={onReset}
+        range={range}
+        startLabel={startLabel}
+      />
+    </Panel>
+  );
+}
+
+function MobileTimelineControls({ children }: { children: ReactNode }) {
+  const [isOpen, setIsOpen] = useState(false);
+
+  return (
+    <div className="border border-[#3b3d4c] bg-[#10111a] px-3 py-2 text-[#f0f0f5] sm:hidden">
+      <button
+        aria-expanded={isOpen}
+        className="min-h-9 w-full text-left text-xs font-semibold uppercase tracking-wide text-[#d7bd83]"
+        onClick={() => setIsOpen((current) => !current)}
+        type="button"
+      >
+        Sacred Timeline range
+      </button>
+      {isOpen ? (
+      <div className="mt-2">
+        {children}
+      </div>
+      ) : null}
+    </div>
+  );
+}
+
+function TimelineRangeControlContent({
+  endLabel,
+  maxIndex,
+  onChange,
+  onCommit,
+  onReset,
+  range,
+  startLabel,
+}: TimelineScrubberProps) {
   const handleKeyUp = (event: ReactKeyboardEvent<HTMLInputElement>) => {
     if (
       ["ArrowDown", "ArrowLeft", "ArrowRight", "ArrowUp", "End", "Home", "PageDown", "PageUp"].includes(
@@ -977,11 +1020,6 @@ function TimelineScrubber({
   };
 
   return (
-    <Panel
-      className="m-3 w-80 border border-[#3b3d4c] bg-[#10111a] px-3 py-2 text-[#f0f0f5] shadow-[inset_0_1px_0_rgba(245,166,35,0.1)]"
-      onClick={(event) => event.stopPropagation()}
-      position="bottom-center"
-    >
       <section aria-labelledby="sacred-timeline-range-title">
         <div className="flex items-baseline justify-between gap-3">
           <h2
@@ -1043,7 +1081,6 @@ function TimelineScrubber({
           </button>
         ) : null}
       </section>
-    </Panel>
   );
 }
 
@@ -1171,7 +1208,7 @@ function TimelineBriefing({ brief }: { brief: TimelineBrief }) {
         <span aria-hidden="true" className={`h-1.5 w-1.5 ${status.dotClass}`} />
         {status.label}
       </p>
-      <dl className="mt-2 grid grid-cols-3 gap-2 border-t border-white/10 pt-2 text-[10px]">
+      <dl className="mt-2 hidden grid-cols-3 gap-2 border-t border-white/10 pt-2 text-[10px] sm:grid">
         <TimelineMetric label="Nexus" value={brief.nexusEventCount} />
         <TimelineMetric label="Convergence" value={brief.convergenceCount} />
         <TimelineMetric
@@ -1404,7 +1441,7 @@ function VariantNavigator({
       </button>
       {isOpen ? (
         <div
-          className="absolute left-0 top-full z-20 mt-1 max-h-52 w-64 overflow-y-auto border border-[#3b3d4c] bg-[#10111a] p-1 shadow-[inset_0_1px_0_rgba(245,166,35,0.1)] sm:left-full sm:top-0 sm:mt-0 sm:ml-2"
+          className="absolute left-0 top-full z-20 mt-1 w-[min(20rem,calc(100vw-2rem))] border border-[#3b3d4c] bg-[#10111a] p-1 shadow-[inset_0_1px_0_rgba(245,166,35,0.1)] sm:left-full sm:top-0 sm:mt-0 sm:ml-2 sm:max-h-52 sm:w-64 sm:overflow-y-auto"
           id="variant-navigator-menu"
           role="menu"
         >
